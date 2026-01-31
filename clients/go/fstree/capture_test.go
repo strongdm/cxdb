@@ -46,8 +46,8 @@ func TestCapture_BasicTree(t *testing.T) {
 func TestCapture_DeterministicHash(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	os.WriteFile(filepath.Join(tmpDir, "a.txt"), []byte("hello"), 0644)
-	os.WriteFile(filepath.Join(tmpDir, "b.txt"), []byte("world"), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, "a.txt"), []byte("hello"), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, "b.txt"), []byte("world"), 0644)
 
 	// Capture twice
 	snap1, err := Capture(tmpDir)
@@ -71,8 +71,8 @@ func TestCapture_ContentAddressing(t *testing.T) {
 
 	// Two files with same content
 	content := []byte("identical content")
-	os.WriteFile(filepath.Join(tmpDir, "file1.txt"), content, 0644)
-	os.WriteFile(filepath.Join(tmpDir, "file2.txt"), content, 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, "file1.txt"), content, 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, "file2.txt"), content, 0644)
 
 	snap, err := Capture(tmpDir)
 	if err != nil {

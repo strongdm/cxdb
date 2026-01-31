@@ -17,9 +17,9 @@ func Example() {
 	tmpDir, _ := os.MkdirTemp("", "workspace")
 	defer os.RemoveAll(tmpDir)
 
-	os.MkdirAll(filepath.Join(tmpDir, "src"), 0755)
-	os.WriteFile(filepath.Join(tmpDir, "README.md"), []byte("# My Project"), 0644)
-	os.WriteFile(filepath.Join(tmpDir, "src", "main.go"), []byte("package main"), 0644)
+	_ = os.MkdirAll(filepath.Join(tmpDir, "src"), 0755)
+	_ = os.WriteFile(filepath.Join(tmpDir, "README.md"), []byte("# My Project"), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, "src", "main.go"), []byte("package main"), 0644)
 
 	// Capture filesystem snapshot
 	snap, err := fstree.Capture(tmpDir,
