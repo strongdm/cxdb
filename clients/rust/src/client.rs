@@ -274,7 +274,7 @@ pub fn dial_tls(addr: &str, opts: impl IntoIterator<Item = ClientOption>) -> Res
     let stream = rustls::StreamOwned::new(conn, stream);
 
     let client = Client {
-        conn: Mutex::new(Connection::Tls(stream)),
+        conn: Mutex::new(Connection::Tls(Box::new(stream))),
         req_id: AtomicU64::new(0),
         closed: AtomicBool::new(false),
         timeout: options.request_timeout,
@@ -309,8 +309,7 @@ fn connect_tcp(addr: &str, timeout: Duration) -> Result<TcpStream> {
 
     Err(last_err
         .map(Error::Io)
-        .unwrap_or(Error::Io(std::io::Error::new(
-            std::io::ErrorKind::Other,
+        .unwrap_or(Error::Io(std::io::Error::other(
             "no addresses resolved",
         ))))
 }
@@ -360,7 +359,7 @@ fn parse_server_error(payload: &[u8]) -> Error {
 
 pub(crate) enum Connection {
     Plain(TcpStream),
-    Tls(rustls::StreamOwned<ClientConnection, TcpStream>),
+    Tls(Box<rustls::StreamOwned<ClientConnection, TcpStream>>),
 }
 
 impl Connection {

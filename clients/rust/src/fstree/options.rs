@@ -1,6 +1,8 @@
 // Copyright 2025 StrongDM Inc
 // SPDX-License-Identifier: Apache-2.0
 
+#![allow(clippy::type_complexity)]
+
 use std::path::Path;
 use std::sync::Arc;
 

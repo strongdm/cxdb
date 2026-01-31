@@ -169,7 +169,7 @@ func (g *GoogleAuth) fetchUser(ctx context.Context, token *oauth2.Token) (google
 	if err != nil {
 		return googleUser{}, fmt.Errorf("userinfo request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return googleUser{}, fmt.Errorf("userinfo status: %d", resp.StatusCode)
 	}

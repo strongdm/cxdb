@@ -25,7 +25,7 @@ impl Snapshot {
             ..UploadResult::default()
         };
 
-        for (_hash, data) in &self.trees {
+        for data in self.trees.values() {
             let was_new = upload_blob(ctx, client, data.to_vec())
                 .map_err(|err| FstreeError::new(FstreeErrorKind::Client, err.to_string()))?;
             if was_new {
@@ -36,7 +36,7 @@ impl Snapshot {
             }
         }
 
-        for (_hash, file_ref) in &self.files {
+        for file_ref in self.files.values() {
             let content = std::fs::read(&file_ref.path)
                 .map_err(|err| FstreeError::new(FstreeErrorKind::Io, err.to_string()))?;
             let was_new = upload_blob(ctx, client, content.clone())
@@ -49,7 +49,7 @@ impl Snapshot {
             }
         }
 
-        for (_hash, target) in &self.symlinks {
+        for target in self.symlinks.values() {
             let bytes = target.as_bytes().to_vec();
             let was_new = upload_blob(ctx, client, bytes.clone())
                 .map_err(|err| FstreeError::new(FstreeErrorKind::Client, err.to_string()))?;

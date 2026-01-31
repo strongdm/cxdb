@@ -203,7 +203,7 @@ func (s *Server) me(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	fmt.Fprintf(w, `{"email":%q,"name":%q,"picture":%q}`, user.Email, user.Name, user.Picture)
+	_, _ = fmt.Fprintf(w, `{"email":%q,"name":%q,"picture":%q}`, user.Email, user.Name, user.Picture)
 }
 
 // staticHandler serves the embedded React frontend with smart routing for Next.js static export.

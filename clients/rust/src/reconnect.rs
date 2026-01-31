@@ -1,6 +1,8 @@
 // Copyright 2025 StrongDM Inc
 // SPDX-License-Identifier: Apache-2.0
 
+#![allow(clippy::type_complexity)]
+
 use std::cmp;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -464,9 +466,7 @@ fn reconnect(inner: &Arc<Inner>, ctx: &RequestContext) -> Result<()> {
 
     for attempt in 1..=inner.max_retries {
         if attempt > 1 {
-            if let Err(err) = sleep_with_cancel(delay, ctx, inner) {
-                return Err(err);
-            }
+            sleep_with_cancel(delay, ctx, inner)?;
             delay = cmp::min(delay * 2, inner.max_retry_delay);
         }
 
@@ -666,8 +666,7 @@ mod tests {
         assert!(is_connection_error(&Error::Tls(
             "connection refused".into()
         )));
-        assert!(is_connection_error(&Error::Io(std::io::Error::new(
-            std::io::ErrorKind::Other,
+        assert!(is_connection_error(&Error::Io(std::io::Error::other(
             "use of closed network connection"
         ))));
     }

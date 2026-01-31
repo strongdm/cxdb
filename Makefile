@@ -81,7 +81,7 @@ gateway-dev: ## Run gateway in dev mode (no OAuth)
 		echo 'DATABASE_PATH=./data/sessions.db' >> gateway/.env; \
 		echo 'GOOGLE_CLIENT_ID=unused' >> gateway/.env; \
 		echo 'GOOGLE_CLIENT_SECRET=unused' >> gateway/.env; \
-		echo 'GOOGLE_ALLOWED_EMAILS=dev@localhost' >> gateway/.env; \
+		echo 'GOOGLE_ALLOWED_DOMAIN=localhost' >> gateway/.env; \
 		echo 'SESSION_SECRET=0000000000000000000000000000000000000000000000000000000000000000' >> gateway/.env; \
 	fi
 	cd gateway && go run ./cmd/server
@@ -90,14 +90,10 @@ gateway-dev: ## Run gateway in dev mode (no OAuth)
 
 .PHONY: dev
 dev: ## Run full dev stack (backend + gateway + frontend) in tmux
-	@if [ ! -d ".scratch/local-data" ]; then \
-		echo "Error: .scratch/local-data/ not found. Copy production data first:"; \
-		echo "  make sync-prod-data"; \
-		exit 1; \
-	fi
+	@mkdir -p .scratch/local-data
 	@tmux kill-session -t cxdb 2>/dev/null || true
 	@tmux new-session -d -s cxdb -n backend
-	@tmux send-keys -t cxdb:backend "cd $(PWD) && CXDB_DATA_DIR=.scratch/local-data CXDB_HTTP_BIND=127.0.0.1:9010 ./target/release/ai-cxdb-store" Enter
+	@tmux send-keys -t cxdb:backend "cd $(PWD) && CXDB_DATA_DIR=.scratch/local-data CXDB_HTTP_BIND=127.0.0.1:9010 ./target/release/cxdb-server" Enter
 	@sleep 2
 	@tmux new-window -t cxdb -n gateway
 	@tmux send-keys -t cxdb:gateway "cd $(PWD)/gateway && make -C .. gateway-dev" Enter

@@ -212,7 +212,6 @@ impl Builder {
         metadata: &fs::Metadata,
     ) -> Result<TreeEntry> {
         let mode = metadata.permissions().perm_mode() & 0o7777;
-        let mode = mode as u32;
 
         if metadata.file_type().is_symlink() && !self.options.follow_symlinks {
             let target = fs::read_link(abs_path)

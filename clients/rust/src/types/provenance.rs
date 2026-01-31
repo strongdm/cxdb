@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct Provenance {
     #[serde(rename = "1")]
     pub parent_context_id: Option<u64>,
@@ -69,37 +69,6 @@ pub struct Provenance {
     pub captured_at: i64,
 }
 
-impl Default for Provenance {
-    fn default() -> Self {
-        Self {
-            parent_context_id: None,
-            spawn_reason: String::new(),
-            root_context_id: None,
-            trace_id: String::new(),
-            span_id: String::new(),
-            correlation_id: String::new(),
-            on_behalf_of: String::new(),
-            on_behalf_of_source: String::new(),
-            on_behalf_of_email: String::new(),
-            writer_method: String::new(),
-            writer_subject: String::new(),
-            writer_issuer: String::new(),
-            service_name: String::new(),
-            service_version: String::new(),
-            service_instance_id: String::new(),
-            process_pid: 0,
-            process_owner: String::new(),
-            host_name: String::new(),
-            host_arch: String::new(),
-            client_address: String::new(),
-            client_port: 0,
-            env_vars: None,
-            sdk_name: String::new(),
-            sdk_version: String::new(),
-            captured_at: 0,
-        }
-    }
-}
 
 pub static DefaultEnvAllowlist: &[&str] = &[
     "K8S_NAMESPACE",

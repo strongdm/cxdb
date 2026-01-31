@@ -132,7 +132,7 @@ func (v *K8sOIDCVerifier) refreshKeySet(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("fetch discovery: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("discovery returned %d", resp.StatusCode)

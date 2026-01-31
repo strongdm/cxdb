@@ -254,11 +254,10 @@ pub struct ContextMetadata {
 #[allow(non_snake_case)]
 pub fn Now() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
-    let ms = SystemTime::now()
+    SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
-        .unwrap_or(0);
-    ms
+        .unwrap_or(0)
 }
 
 fn is_zero_i64(value: &i64) -> bool {

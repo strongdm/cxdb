@@ -66,7 +66,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN mkdir -p /app /data /var/log/supervisor
 
 # Copy binaries and static files
-COPY --from=backend /app/target/release/ai-cxdb-store /app/cxdb
+COPY --from=backend /app/target/release/cxdb-server /app/cxdb
 COPY --from=frontend /app/out /usr/share/nginx/html
 
 # Copy nginx config

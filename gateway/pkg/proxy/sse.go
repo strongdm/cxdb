@@ -89,7 +89,7 @@ func (b *SSEBroker) poll() {
 		b.lastPollError = err
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		b.lastPollError = fmt.Errorf("backend returned %d", resp.StatusCode)
@@ -216,11 +216,11 @@ func (b *SSEBroker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Send minimal initial message - just retry and comment
 	b.logger.Info("sse_sending_connected")
-	fmt.Fprintf(w, "retry: 10000\n\n")
+	_, _ = fmt.Fprintf(w, "retry: 10000\n\n")
 	flusher.Flush()
 
 	// Send connected event
-	fmt.Fprintf(w, "event: connected\ndata: {\"status\":\"connected\"}\n\n")
+	_, _ = fmt.Fprintf(w, "event: connected\ndata: {\"status\":\"connected\"}\n\n")
 	flusher.Flush()
 	b.logger.Info("sse_flushed_connected")
 

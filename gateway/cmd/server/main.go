@@ -46,7 +46,7 @@ func main() {
 		logger.Error("session store init failed", "err", err)
 		os.Exit(1)
 	}
-	defer sessionStore.Close()
+	defer func() { _ = sessionStore.Close() }()
 
 	googleAuth := auth.NewGoogleAuth(
 		cfg.PublicBaseURL,
