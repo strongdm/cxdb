@@ -131,8 +131,8 @@ func TestCapture_ModeBits(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	// Create executable and regular file
-	os.WriteFile(filepath.Join(tmpDir, "script.sh"), []byte("#!/bin/bash"), 0755)
-	os.WriteFile(filepath.Join(tmpDir, "data.txt"), []byte("data"), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, "script.sh"), []byte("#!/bin/bash"), 0755)
+	_ = os.WriteFile(filepath.Join(tmpDir, "data.txt"), []byte("data"), 0644)
 
 	snap, err := Capture(tmpDir)
 	if err != nil {
@@ -161,9 +161,9 @@ func TestSnapshot_Diff(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	// Initial state
-	os.WriteFile(filepath.Join(tmpDir, "keep.txt"), []byte("keep"), 0644)
-	os.WriteFile(filepath.Join(tmpDir, "modify.txt"), []byte("original"), 0644)
-	os.WriteFile(filepath.Join(tmpDir, "delete.txt"), []byte("delete me"), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, "keep.txt"), []byte("keep"), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, "modify.txt"), []byte("original"), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, "delete.txt"), []byte("delete me"), 0644)
 
 	snap1, err := Capture(tmpDir)
 	if err != nil {
