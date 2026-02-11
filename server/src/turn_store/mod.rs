@@ -72,25 +72,25 @@ impl TurnStore {
 
         let turns_log = OpenOptions::new()
             .create(true)
-            .truncate(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(&turns_log_path)?;
         let turns_idx = OpenOptions::new()
             .create(true)
-            .truncate(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(&turns_idx_path)?;
         let turns_meta = OpenOptions::new()
             .create(true)
-            .truncate(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(&turns_meta_path)?;
         let heads_tbl = OpenOptions::new()
             .create(true)
-            .truncate(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(&heads_tbl_path)?;
