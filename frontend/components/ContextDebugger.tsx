@@ -437,6 +437,8 @@ interface ContextDebuggerProps {
   onNavigateToContext?: (contextId: string) => void;
 }
 
+const TURNS_PAGE_SIZE = 100;
+
 export function ContextDebugger({ contextId, isOpen, onClose, lastEvent, initialTurnId, onTurnChange, onNavigateToContext }: ContextDebuggerProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const turnListRef = useRef<HTMLDivElement | null>(null);
@@ -447,6 +449,7 @@ export function ContextDebugger({ contextId, isOpen, onClose, lastEvent, initial
 
   // Data fetching state
   const [loading, setLoading] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [data, setData] = useState<TurnResponse | null>(null);
 
@@ -474,7 +477,7 @@ export function ContextDebugger({ contextId, isOpen, onClose, lastEvent, initial
 
     try {
       const response = await fetchTurns(contextId, {
-        limit: 100,
+        limit: TURNS_PAGE_SIZE,
         view: 'typed',
         include_unknown: true,
       });
@@ -490,6 +493,32 @@ export function ContextDebugger({ contextId, isOpen, onClose, lastEvent, initial
       setLoading(false);
     }
   }, [contextId]);
+
+  // Load older turns using pagination cursor
+  const loadMore = useCallback(async () => {
+    if (!contextId || !data?.next_before_turn_id) return;
+
+    setLoadingMore(true);
+    try {
+      const response = await fetchTurns(contextId, {
+        limit: TURNS_PAGE_SIZE,
+        before_turn_id: data.next_before_turn_id,
+        view: 'typed',
+        include_unknown: true,
+      });
+      const prepended = response.turns.length;
+      setData(prev => prev ? {
+        ...prev,
+        turns: [...response.turns, ...prev.turns],
+        next_before_turn_id: response.next_before_turn_id,
+      } : response);
+      setSelectedIdx(prev => prev + prepended);
+    } catch {
+      // Keep existing data on failure
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [contextId, data?.next_before_turn_id]);
 
   useEffect(() => {
     if (isOpen && contextId) {
@@ -617,7 +646,7 @@ export function ContextDebugger({ contextId, isOpen, onClose, lastEvent, initial
 
   // Count stats - count both tool_call turns AND tool_calls embedded in assistant turns
   const stats = useMemo(() => {
-    if (!data?.turns) return { total: 0, toolCalls: 0, errors: 0 };
+    if (!data?.turns) return { total: 0, loaded: 0, toolCalls: 0, errors: 0 };
     let toolCalls = 0;
     let errors = 0;
     for (const turn of data.turns) {
@@ -632,7 +661,8 @@ export function ContextDebugger({ contextId, isOpen, onClose, lastEvent, initial
       const result = extractToolResult(turn);
       if (result?.isError) errors++;
     }
-    return { total: data.turns.length, toolCalls, errors };
+    const totalDepth = (data.meta?.head_depth ?? -1) + 1;
+    return { total: totalDepth, loaded: data.turns.length, toolCalls, errors };
   }, [data]);
 
   // Auto-select last turn when following and new turns arrive
@@ -759,7 +789,7 @@ export function ContextDebugger({ contextId, isOpen, onClose, lastEvent, initial
             </div>
             {data && (
               <div className="flex items-center gap-3 text-xs text-theme-text-dim">
-                <span>{stats.total} turns</span>
+                <span>{stats.loaded < stats.total ? `${stats.loaded} of ${stats.total} turns` : `${stats.total} turns`}</span>
                 <span>{stats.toolCalls} tool calls</span>
                 {stats.errors > 0 && (
                   <span className="text-red-400">{stats.errors} errors</span>
@@ -836,7 +866,17 @@ export function ContextDebugger({ contextId, isOpen, onClose, lastEvent, initial
                   {data?.turns.length === 0 ? 'No turns.' : 'No matches.'}
                 </div>
               ) : (
-                filteredTurns.map((turn, idx) => {
+                <>
+                {data && data.turns.length > 0 && data.turns[0].depth > 0 && (
+                  <button
+                    onClick={loadMore}
+                    disabled={loadingMore}
+                    className="w-full px-3 py-2 text-xs text-theme-accent hover:bg-theme-bg-tertiary/40 border-b border-theme-border-dim/60 transition-colors disabled:opacity-50"
+                  >
+                    {loadingMore ? 'Loading...' : `Load older turns (${data.turns[0].depth} remaining)`}
+                  </button>
+                )}
+                {filteredTurns.map((turn, idx) => {
                   const kind = detectTurnKind(turn);
                   const colors = getKindColors(kind);
                   const isSelected = idx === selectedIdx;
@@ -880,7 +920,8 @@ export function ContextDebugger({ contextId, isOpen, onClose, lastEvent, initial
                       </div>
                     </button>
                   );
-                })
+                })}
+                </>
               )}
 
               {/* Resume following indicator */}
