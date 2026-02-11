@@ -144,7 +144,8 @@ fn render_field_value(
     }
 
     // Handle type references - recursively project using the referenced type
-    if field.field_type == "ref" {
+    // Also recurse for "map" fields with a type_ref (e.g., metrics: map with ref to TurnMetrics)
+    if field.type_ref.is_some() && (field.field_type == "ref" || field.field_type == "map") {
         if let Some(type_ref) = &field.type_ref {
             return render_type_ref(value, type_ref, registry, options);
         }
@@ -152,7 +153,7 @@ fn render_field_value(
 
     let field_type = field.field_type.as_str();
     match field_type {
-        "u64" | "uint64" | "int64" => render_u64(value, options),
+        "u64" | "uint64" | "i64" | "int64" => render_u64(value, options),
         "u32" | "uint32" | "u8" | "uint8" | "int32" => render_int(value),
         "string" => render_string(value),
         "bool" => render_bool(value),

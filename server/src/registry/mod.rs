@@ -348,6 +348,9 @@ fn normalize_version(version: u32, def: &TypeVersion) -> Result<TypeVersionSpec>
                     } else {
                         Some(ItemsSpec::Simple(t.clone()))
                     }
+                // Support shorthand: { "ref": "cxdb.SomeType" } without "type" key
+                } else if let Some(serde_json::Value::String(r)) = obj.get("ref") {
+                    Some(ItemsSpec::Ref(r.clone()))
                 } else {
                     None
                 }

@@ -506,8 +506,8 @@ fn handle_request(
                     _ => BytesRender::Base64,
                 };
                 let u64_format = match params.get("u64_format").map(|v| v.as_str()) {
-                    Some("number") => U64Format::Number,
-                    _ => U64Format::String,
+                    Some("string") => U64Format::String,
+                    _ => U64Format::Number,
                 };
                 let enum_render = match params.get("enum_render").map(|v| v.as_str()) {
                     Some("number") => EnumRender::Number,
