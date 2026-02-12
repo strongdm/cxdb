@@ -295,6 +295,17 @@ fn handle_client(
                         labels: meta.labels,
                         has_provenance: meta.provenance.is_some(),
                     });
+
+                    if let Some(prov) = meta.provenance {
+                        if let Some(parent_context_id) = prov.parent_context_id {
+                            event_bus.publish(StoreEvent::ContextLinked {
+                                child_context_id: req.context_id.to_string(),
+                                parent_context_id: parent_context_id.to_string(),
+                                root_context_id: prov.root_context_id.map(|v| v.to_string()),
+                                spawn_reason: prov.spawn_reason,
+                            });
+                        }
+                    }
                 }
 
                 let resp = encode_append_ack(

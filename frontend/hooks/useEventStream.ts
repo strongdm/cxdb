@@ -7,6 +7,7 @@ import type {
   ConnectionState,
   ContextCreatedEvent,
   ContextMetadataUpdatedEvent,
+  ContextLinkedEvent,
   TurnAppendedEvent,
   ClientConnectedEvent,
   ClientDisconnectedEvent,
@@ -73,6 +74,14 @@ export function useEventStream(options: UseEventStreamOptions = {}): UseEventStr
         }
         if (event.type === 'context_metadata_updated' && event.data.context_id !== contextId) {
           return;
+        }
+        if (event.type === 'context_linked') {
+          if (
+            event.data.child_context_id !== contextId &&
+            event.data.parent_context_id !== contextId
+          ) {
+            return;
+          }
         }
       }
 
@@ -151,6 +160,15 @@ export function useEventStream(options: UseEventStreamOptions = {}): UseEventStr
             handleEvent({ type: 'context_metadata_updated', data });
           } catch (err) {
             console.error('Failed to parse context_metadata_updated event:', err);
+          }
+        });
+
+        eventSource.addEventListener('context_linked', (e: MessageEvent) => {
+          try {
+            const data: ContextLinkedEvent = JSON.parse(e.data);
+            handleEvent({ type: 'context_linked', data });
+          } catch (err) {
+            console.error('Failed to parse context_linked event:', err);
           }
         });
 

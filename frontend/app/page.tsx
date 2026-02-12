@@ -114,6 +114,53 @@ export default function Home() {
       );
     }
 
+    // Link child context to parent context lineage
+    if (event.type === 'context_linked') {
+      setContexts(prev =>
+        prev.map(c => {
+          if (c.context_id === event.data.child_context_id) {
+            return {
+              ...c,
+              lineage: {
+                parent_context_id: event.data.parent_context_id,
+                root_context_id: event.data.root_context_id,
+                spawn_reason: event.data.spawn_reason,
+                child_context_count: c.lineage?.child_context_count ?? 0,
+                child_context_ids: c.lineage?.child_context_ids ?? [],
+              },
+              provenance: {
+                ...(c.provenance ?? {}),
+                parent_context_id: Number(event.data.parent_context_id),
+                root_context_id: event.data.root_context_id
+                  ? Number(event.data.root_context_id)
+                  : c.provenance?.root_context_id,
+                spawn_reason: event.data.spawn_reason ?? c.provenance?.spawn_reason,
+              },
+            };
+          }
+
+          if (c.context_id === event.data.parent_context_id) {
+            const existingChildren = c.lineage?.child_context_ids ?? [];
+            const childContextIds = existingChildren.includes(event.data.child_context_id)
+              ? existingChildren
+              : [...existingChildren, event.data.child_context_id];
+            return {
+              ...c,
+              lineage: {
+                parent_context_id: c.lineage?.parent_context_id,
+                root_context_id: c.lineage?.root_context_id,
+                spawn_reason: c.lineage?.spawn_reason,
+                child_context_count: childContextIds.length,
+                child_context_ids: childContextIds,
+              },
+            };
+          }
+
+          return c;
+        })
+      );
+    }
+
     // Update context activity timestamp on turn append
     if (event.type === 'turn_appended') {
       setContexts(prev =>

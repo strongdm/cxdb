@@ -101,6 +101,14 @@ export interface ContextEntry {
   labels?: string[];
   // Provenance (origin story)
   provenance?: import('./provenance').Provenance;
+  // Server-provided lineage summary (optional, include_lineage=1)
+  lineage?: {
+    parent_context_id?: string;
+    root_context_id?: string;
+    spawn_reason?: string;
+    child_context_count: number;
+    child_context_ids: string[];
+  };
 }
 
 // ============================================
@@ -141,6 +149,13 @@ export interface ContextMetadataUpdatedEvent {
   has_provenance: boolean;
 }
 
+export interface ContextLinkedEvent {
+  child_context_id: string;
+  parent_context_id: string;
+  root_context_id?: string;
+  spawn_reason?: string;
+}
+
 export interface ClientConnectedEvent {
   session_id: string;
   client_tag: string;
@@ -164,6 +179,7 @@ export interface ErrorOccurredEvent {
 export type StoreEvent =
   | { type: 'context_created'; data: ContextCreatedEvent }
   | { type: 'context_metadata_updated'; data: ContextMetadataUpdatedEvent }
+  | { type: 'context_linked'; data: ContextLinkedEvent }
   | { type: 'turn_appended'; data: TurnAppendedEvent }
   | { type: 'client_connected'; data: ClientConnectedEvent }
   | { type: 'client_disconnected'; data: ClientDisconnectedEvent }

@@ -18,16 +18,18 @@ The fastest way to try CXDB is with the pre-built Docker image:
 # Run the server (binary protocol :9009, HTTP :9010)
 docker run -p 9009:9009 -p 9010:9010 -v $(pwd)/data:/data cxdb/cxdb:latest
 
-# Create a context and append a turn
-curl -X POST http://localhost:9010/v1/contexts
+# Create a context and append a turn (HTTP write path)
+curl -X POST http://localhost:9010/v1/contexts/create \
+  -H "Content-Type: application/json" \
+  -d '{"base_turn_id": "0"}'
 # => {"context_id": "1", "head_turn_id": "0", "head_depth": 0}
 
-curl -X POST http://localhost:9010/v1/contexts/1/turns \
+curl -X POST http://localhost:9010/v1/contexts/1/append \
   -H "Content-Type: application/json" \
   -d '{
     "type_id": "com.example.Message",
     "type_version": 1,
-    "payload": {"role": "user", "text": "Hello!"}
+    "data": {"role": "user", "text": "Hello!"}
   }'
 
 # View in the UI

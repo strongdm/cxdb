@@ -12,12 +12,16 @@ The HTTP module provides a REST-ish JSON API for reading turns, managing context
 
 - `GET /v1/contexts` - List contexts
 - `GET /v1/contexts/:id` - Get context details
+- `GET /v1/contexts/:id/children` - Get direct/recursive child contexts
+- `GET /v1/contexts/:id/provenance` - Get provenance block
+- `POST /v1/contexts` - Create context (alias)
 - `POST /v1/contexts/create` - Create context
 - `POST /v1/contexts/fork` - Fork from turn
 
 ### Turns
 
 - `GET /v1/contexts/:id/turns` - Get turns with optional projection
+- `POST /v1/contexts/:id/turns` - Append turn (alias)
 - `POST /v1/contexts/:id/append` - Append turn
 
 ### Registry

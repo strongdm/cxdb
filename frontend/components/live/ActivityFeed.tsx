@@ -156,6 +156,13 @@ function getEventDisplay(event: StoreEvent): {
         icon: <AlertCircle size={12} />,
         label: `${event.data.kind} ${event.data.status_code}: ${event.data.message}`,
       };
+
+    case 'context_linked':
+      return {
+        icon: <Folder size={12} />,
+        label: `Linked to parent ${event.data.parent_context_id}`,
+        contextId: event.data.child_context_id,
+      };
   }
 }
 

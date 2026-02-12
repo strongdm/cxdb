@@ -34,6 +34,15 @@ pub enum StoreEvent {
         labels: Option<Vec<String>>,
         has_provenance: bool,
     },
+    /// A context was linked to a parent context (cross-context lineage).
+    ContextLinked {
+        child_context_id: String,
+        parent_context_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        root_context_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        spawn_reason: Option<String>,
+    },
     /// A turn was appended to a context.
     TurnAppended {
         context_id: String,
@@ -73,6 +82,7 @@ impl StoreEvent {
         let event_type = match self {
             StoreEvent::ContextCreated { .. } => "context_created",
             StoreEvent::ContextMetadataUpdated { .. } => "context_metadata_updated",
+            StoreEvent::ContextLinked { .. } => "context_linked",
             StoreEvent::TurnAppended { .. } => "turn_appended",
             StoreEvent::ClientConnected { .. } => "client_connected",
             StoreEvent::ClientDisconnected { .. } => "client_disconnected",
@@ -111,6 +121,24 @@ impl StoreEvent {
                 }
                 if let Some(l) = labels {
                     obj["labels"] = serde_json::json!(l);
+                }
+                obj
+            }
+            StoreEvent::ContextLinked {
+                child_context_id,
+                parent_context_id,
+                root_context_id,
+                spawn_reason,
+            } => {
+                let mut obj = serde_json::json!({
+                    "child_context_id": child_context_id,
+                    "parent_context_id": parent_context_id,
+                });
+                if let Some(root) = root_context_id {
+                    obj["root_context_id"] = serde_json::Value::String(root.clone());
+                }
+                if let Some(reason) = spawn_reason {
+                    obj["spawn_reason"] = serde_json::Value::String(reason.clone());
                 }
                 obj
             }
@@ -296,6 +324,21 @@ mod tests {
         assert_eq!(event_type, "context_metadata_updated");
         assert!(data.contains("\"context_id\":\"123\""));
         assert!(data.contains("\"title\":\"Fix bug\""));
+    }
+
+    #[test]
+    fn test_context_linked_event_to_sse() {
+        let event = StoreEvent::ContextLinked {
+            child_context_id: "12".to_string(),
+            parent_context_id: "5".to_string(),
+            root_context_id: Some("1".to_string()),
+            spawn_reason: Some("sub_agent".to_string()),
+        };
+
+        let (event_type, data) = event.to_sse();
+        assert_eq!(event_type, "context_linked");
+        assert!(data.contains("\"child_context_id\":\"12\""));
+        assert!(data.contains("\"parent_context_id\":\"5\""));
     }
 
     #[test]

@@ -1,7 +1,7 @@
 // Copyright 2025 StrongDM Inc
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 
 use blake3::Hasher;
@@ -307,6 +307,51 @@ impl Store {
 
     pub fn list_recent_contexts(&self, limit: u32) -> Vec<ContextHead> {
         self.turn_store.list_recent_contexts(limit)
+    }
+
+    /// Return direct child context IDs for a parent context.
+    ///
+    /// Child relationships are derived from first-turn provenance
+    /// (`provenance.parent_context_id`) and maintained in secondary indexes.
+    pub fn child_context_ids(&self, parent_context_id: u64) -> Vec<u64> {
+        let mut ids: Vec<u64> = self
+            .secondary_indexes
+            .lookup_parent_exact(parent_context_id)
+            .into_iter()
+            .collect();
+        ids.sort_unstable_by(|a, b| b.cmp(a));
+        ids
+    }
+
+    /// Return descendant context IDs (children, grandchildren, ...) for a parent context.
+    ///
+    /// Results are deduplicated and sorted by context ID descending.
+    pub fn descendant_context_ids(&self, parent_context_id: u64, limit: Option<u32>) -> Vec<u64> {
+        let mut out = Vec::new();
+        let mut visited = HashSet::new();
+        let mut queue: VecDeque<u64> = self.child_context_ids(parent_context_id).into();
+
+        while let Some(context_id) = queue.pop_front() {
+            if !visited.insert(context_id) {
+                continue;
+            }
+            out.push(context_id);
+
+            if let Some(max) = limit {
+                if out.len() >= max as usize {
+                    break;
+                }
+            }
+
+            for child in self.child_context_ids(context_id) {
+                if !visited.contains(&child) {
+                    queue.push_back(child);
+                }
+            }
+        }
+
+        out.sort_unstable_by(|a, b| b.cmp(a));
+        out
     }
 
     // =========================================================================

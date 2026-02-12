@@ -111,6 +111,8 @@ export interface FetchContextsOptions {
   tag?: string;
   /** Include full provenance data for each context. */
   include_provenance?: boolean;
+  /** Include parent/root/children lineage summary for each context. */
+  include_lineage?: boolean;
 }
 
 /**
@@ -131,9 +133,109 @@ export async function fetchContexts(limitOrOptions: number | FetchContextsOption
   if (options.include_provenance) {
     params.set('include_provenance', '1');
   }
+  if (options.include_lineage) {
+    params.set('include_lineage', '1');
+  }
 
   const queryString = params.toString();
   const url = `${API_BASE}/contexts${queryString ? `?${queryString}` : ''}`;
+  const response = await fetch(url);
+
+  if (!response.ok) {
+    let errorData: ErrorResponse | undefined;
+    try {
+      errorData = await response.json();
+    } catch {
+      // Ignore JSON parse errors
+    }
+    throw new ApiError(
+      errorData?.error?.message || `HTTP ${response.status}`,
+      errorData?.error?.code || response.status,
+      errorData
+    );
+  }
+
+  return response.json();
+}
+
+export interface FetchContextOptions {
+  include_provenance?: boolean;
+  include_lineage?: boolean;
+}
+
+/**
+ * Fetch details for a specific context.
+ */
+export async function fetchContext(
+  contextId: string,
+  options: FetchContextOptions = {}
+): Promise<ContextEntry> {
+  const params = new URLSearchParams();
+  if (options.include_provenance !== false) {
+    params.set('include_provenance', '1');
+  }
+  if (options.include_lineage !== false) {
+    params.set('include_lineage', '1');
+  }
+
+  const queryString = params.toString();
+  const url = `${API_BASE}/contexts/${encodeURIComponent(contextId)}${queryString ? `?${queryString}` : ''}`;
+  const response = await fetch(url);
+
+  if (!response.ok) {
+    let errorData: ErrorResponse | undefined;
+    try {
+      errorData = await response.json();
+    } catch {
+      // Ignore JSON parse errors
+    }
+    throw new ApiError(
+      errorData?.error?.message || `HTTP ${response.status}`,
+      errorData?.error?.code || response.status,
+      errorData
+    );
+  }
+
+  return response.json();
+}
+
+export interface FetchContextChildrenOptions {
+  recursive?: boolean;
+  limit?: number;
+  include_provenance?: boolean;
+  include_lineage?: boolean;
+}
+
+export interface ContextChildrenResponse {
+  context_id: string;
+  recursive: boolean;
+  count: number;
+  children: ContextEntry[];
+}
+
+/**
+ * Fetch child contexts for a parent context.
+ */
+export async function fetchContextChildren(
+  contextId: string,
+  options: FetchContextChildrenOptions = {}
+): Promise<ContextChildrenResponse> {
+  const params = new URLSearchParams();
+  if (options.recursive) {
+    params.set('recursive', '1');
+  }
+  if (options.limit !== undefined) {
+    params.set('limit', String(options.limit));
+  }
+  if (options.include_provenance !== false) {
+    params.set('include_provenance', '1');
+  }
+  if (options.include_lineage !== false) {
+    params.set('include_lineage', '1');
+  }
+
+  const queryString = params.toString();
+  const url = `${API_BASE}/contexts/${encodeURIComponent(contextId)}/children${queryString ? `?${queryString}` : ''}`;
   const response = await fetch(url);
 
   if (!response.ok) {

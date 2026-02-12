@@ -5,9 +5,10 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
+use rmpv::Value as MsgpackValue;
 use serde_json::{json, Map, Value as JsonValue};
 use tiny_http::{Header, Method, Response, Server, StatusCode};
 use url::Url;
@@ -17,7 +18,9 @@ use crate::events::{EventBus, StoreEvent};
 use crate::fs_store::EntryKind;
 use crate::metrics::{Metrics, SessionTracker};
 use crate::projection::{BytesRender, EnumRender, RenderOptions, TimeRender, U64Format};
-use crate::registry::{PutOutcome, Registry, RegistryBundle, RendererSpec, TypeVersionSpec};
+use crate::registry::{
+    FieldSpec, ItemsSpec, PutOutcome, Registry, RegistryBundle, RendererSpec, TypeVersionSpec,
+};
 use crate::store::Store;
 
 type HttpResponse = (u16, Response<std::io::Cursor<Vec<u8>>>);
@@ -209,6 +212,10 @@ fn handle_request(
                     .get("include_provenance")
                     .map(|v| v == "1")
                     .unwrap_or(false);
+                let include_lineage = params
+                    .get("include_lineage")
+                    .map(|v| v == "1")
+                    .unwrap_or(false);
 
                 let mut store = store.lock().unwrap();
                 let contexts = store.list_recent_contexts(limit);
@@ -216,63 +223,20 @@ fn handle_request(
                 let contexts_json: Vec<JsonValue> = contexts
                     .iter()
                     .filter_map(|c| {
-                        // Get session info for this context (for live status)
-                        let session = session_tracker.get_session_for_context(c.context_id);
-                        let session_id = session.as_ref().map(|s| s.session_id);
-                        let is_live = session.is_some();
-                        let last_activity_at = session.as_ref().map(|s| s.last_activity_at);
-                        let session_peer_addr = session.as_ref().and_then(|s| s.peer_addr.clone());
+                        let obj = context_to_json(
+                            &mut store,
+                            session_tracker,
+                            c.context_id,
+                            include_provenance,
+                            include_lineage,
+                        )
+                        .ok()?;
 
-                        // Get client_tag: prefer stored metadata, fall back to session
-                        let stored_metadata = store.get_context_metadata(c.context_id);
-                        let client_tag = stored_metadata
-                            .as_ref()
-                            .and_then(|m| m.client_tag.clone())
-                            .or_else(|| session.as_ref().map(|s| s.client_tag.clone()))
-                            .filter(|t| !t.is_empty());
-
-                        // Apply tag filter if specified
+                        let client_tag = obj.get("client_tag").and_then(|v| v.as_str());
                         if let Some(ref filter) = tag_filter {
-                            let tag = client_tag.as_deref().unwrap_or("");
+                            let tag = client_tag.unwrap_or("");
                             if tag != filter {
                                 return None;
-                            }
-                        }
-
-                        let mut obj = json!({
-                            "context_id": c.context_id.to_string(),
-                            "head_turn_id": c.head_turn_id.to_string(),
-                            "head_depth": c.head_depth,
-                            "created_at_unix_ms": c.created_at_unix_ms,
-                            "is_live": is_live,
-                        });
-
-                        if let Some(tag) = client_tag {
-                            obj["client_tag"] = JsonValue::String(tag);
-                        }
-                        if let Some(sid) = session_id {
-                            obj["session_id"] = JsonValue::String(sid.to_string());
-                        }
-                        if let Some(ts) = last_activity_at {
-                            obj["last_activity_at"] = JsonValue::Number(ts.into());
-                        }
-
-                        // Include provenance if requested
-                        if include_provenance {
-                            if let Some(ref metadata) = stored_metadata {
-                                if let Some(ref prov) = metadata.provenance {
-                                    // Clone provenance and inject server-side client_address if not present
-                                    let mut prov_with_server_info = prov.clone();
-                                    if prov_with_server_info.client_address.is_none() {
-                                        prov_with_server_info.client_address =
-                                            session_peer_addr.clone();
-                                    }
-                                    if let Ok(prov_json) =
-                                        serde_json::to_value(&prov_with_server_info)
-                                    {
-                                        obj["provenance"] = prov_json;
-                                    }
-                                }
                             }
                         }
 
@@ -315,6 +279,105 @@ fn handle_request(
                     200,
                     Response::from_data(bytes)
                         .with_status_code(StatusCode(200))
+                        .with_header(
+                            Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+                                .unwrap(),
+                        ),
+                ))
+            }
+            (Method::Post, ["v1", "contexts"]) => {
+                let base_turn_id = parse_base_turn_id(&mut request, 0, false)?;
+                let client_tag = extract_http_client_tag(&request);
+
+                let head = {
+                    let mut store = store.lock().unwrap();
+                    store.create_context(base_turn_id)?
+                };
+
+                event_bus.publish(StoreEvent::ContextCreated {
+                    context_id: head.context_id.to_string(),
+                    session_id: "http".to_string(),
+                    client_tag,
+                    created_at: unix_ms(),
+                });
+
+                let resp = json!({
+                    "context_id": head.context_id.to_string(),
+                    "head_turn_id": head.head_turn_id.to_string(),
+                    "head_depth": head.head_depth,
+                });
+                let bytes = serde_json::to_vec(&resp)
+                    .map_err(|e| StoreError::InvalidInput(format!("json encode error: {e}")))?;
+                Ok((
+                    201,
+                    Response::from_data(bytes)
+                        .with_status_code(StatusCode(201))
+                        .with_header(
+                            Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+                                .unwrap(),
+                        ),
+                ))
+            }
+            (Method::Post, ["v1", "contexts", "create"]) => {
+                let base_turn_id = parse_base_turn_id(&mut request, 0, false)?;
+                let client_tag = extract_http_client_tag(&request);
+
+                let head = {
+                    let mut store = store.lock().unwrap();
+                    store.create_context(base_turn_id)?
+                };
+
+                event_bus.publish(StoreEvent::ContextCreated {
+                    context_id: head.context_id.to_string(),
+                    session_id: "http".to_string(),
+                    client_tag,
+                    created_at: unix_ms(),
+                });
+
+                let resp = json!({
+                    "context_id": head.context_id.to_string(),
+                    "head_turn_id": head.head_turn_id.to_string(),
+                    "head_depth": head.head_depth,
+                });
+                let bytes = serde_json::to_vec(&resp)
+                    .map_err(|e| StoreError::InvalidInput(format!("json encode error: {e}")))?;
+                Ok((
+                    201,
+                    Response::from_data(bytes)
+                        .with_status_code(StatusCode(201))
+                        .with_header(
+                            Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+                                .unwrap(),
+                        ),
+                ))
+            }
+            (Method::Post, ["v1", "contexts", "fork"]) => {
+                let base_turn_id = parse_base_turn_id(&mut request, 0, true)?;
+                let client_tag = extract_http_client_tag(&request);
+
+                let head = {
+                    let mut store = store.lock().unwrap();
+                    store.fork_context(base_turn_id)?
+                };
+
+                event_bus.publish(StoreEvent::ContextCreated {
+                    context_id: head.context_id.to_string(),
+                    session_id: "http".to_string(),
+                    client_tag,
+                    created_at: unix_ms(),
+                });
+
+                let resp = json!({
+                    "context_id": head.context_id.to_string(),
+                    "head_turn_id": head.head_turn_id.to_string(),
+                    "head_depth": head.head_depth,
+                });
+                let bytes = serde_json::to_vec(&resp)
+                    .map_err(|e| StoreError::InvalidInput(format!("json encode error: {e}")))?;
+                Ok((
+                    201,
+                    Response::from_data(bytes)
+                        .with_status_code(StatusCode(201))
                         .with_header(
                             Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
                                 .unwrap(),
@@ -433,6 +496,110 @@ fn handle_request(
                     }
                 }
             }
+            // Get context details
+            (Method::Get, ["v1", "contexts", context_id]) => {
+                let context_id: u64 = context_id
+                    .parse()
+                    .map_err(|_| StoreError::InvalidInput("invalid context_id".into()))?;
+                let params = parse_query(url.query().unwrap_or(""));
+                let include_provenance = params
+                    .get("include_provenance")
+                    .map(|v| v == "1")
+                    .unwrap_or(true);
+                let include_lineage = params
+                    .get("include_lineage")
+                    .map(|v| v == "1")
+                    .unwrap_or(true);
+
+                let mut store = store.lock().unwrap();
+                let obj = context_to_json(
+                    &mut store,
+                    session_tracker,
+                    context_id,
+                    include_provenance,
+                    include_lineage,
+                )?;
+
+                let bytes = serde_json::to_vec(&obj)
+                    .map_err(|e| StoreError::InvalidInput(format!("json encode error: {e}")))?;
+                Ok((
+                    200,
+                    Response::from_data(bytes)
+                        .with_status_code(StatusCode(200))
+                        .with_header(
+                            Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+                                .unwrap(),
+                        ),
+                ))
+            }
+            // Get children/descendants for a specific context
+            (Method::Get, ["v1", "contexts", context_id, "children"]) => {
+                let context_id: u64 = context_id
+                    .parse()
+                    .map_err(|_| StoreError::InvalidInput("invalid context_id".into()))?;
+                let params = parse_query(url.query().unwrap_or(""));
+                let recursive = params
+                    .get("recursive")
+                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false);
+                let include_provenance = params
+                    .get("include_provenance")
+                    .map(|v| v == "1")
+                    .unwrap_or(true);
+                let include_lineage = params
+                    .get("include_lineage")
+                    .map(|v| v == "1")
+                    .unwrap_or(true);
+                let limit = params
+                    .get("limit")
+                    .and_then(|v| v.parse::<u32>().ok())
+                    .unwrap_or(256);
+
+                let mut store = store.lock().unwrap();
+                // Validate parent context exists
+                store.get_head(context_id)?;
+
+                let child_ids = if recursive {
+                    store.descendant_context_ids(context_id, Some(limit))
+                } else {
+                    let mut ids = store.child_context_ids(context_id);
+                    ids.truncate(limit as usize);
+                    ids
+                };
+
+                let children: Vec<JsonValue> = child_ids
+                    .iter()
+                    .filter_map(|child_id| {
+                        context_to_json(
+                            &mut store,
+                            session_tracker,
+                            *child_id,
+                            include_provenance,
+                            include_lineage,
+                        )
+                        .ok()
+                    })
+                    .collect();
+
+                let resp = json!({
+                    "context_id": context_id.to_string(),
+                    "recursive": recursive,
+                    "count": children.len(),
+                    "children": children,
+                });
+
+                let bytes = serde_json::to_vec(&resp)
+                    .map_err(|e| StoreError::InvalidInput(format!("json encode error: {e}")))?;
+                Ok((
+                    200,
+                    Response::from_data(bytes)
+                        .with_status_code(StatusCode(200))
+                        .with_header(
+                            Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+                                .unwrap(),
+                        ),
+                ))
+            }
             // Get provenance for a specific context
             (Method::Get, ["v1", "contexts", context_id, "provenance"]) => {
                 let context_id: u64 = context_id
@@ -440,6 +607,7 @@ fn handle_request(
                     .map_err(|_| StoreError::InvalidInput("invalid context_id".into()))?;
 
                 let mut store = store.lock().unwrap();
+                store.get_head(context_id)?;
                 let metadata = store.get_context_metadata(context_id);
 
                 // Get session info for server-side data
@@ -476,6 +644,92 @@ fn handle_request(
                     200,
                     Response::from_data(bytes)
                         .with_status_code(StatusCode(200))
+                        .with_header(
+                            Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+                                .unwrap(),
+                        ),
+                ))
+            }
+            (Method::Post, ["v1", "contexts", context_id, "append"])
+            | (Method::Post, ["v1", "contexts", context_id, "turns"]) => {
+                let context_id: u64 = context_id
+                    .parse()
+                    .map_err(|_| StoreError::InvalidInput("invalid context_id".into()))?;
+
+                let body = parse_json_body(&mut request)?;
+                let type_id = get_required_string(&body, "type_id")?;
+                let type_version = get_required_u32(&body, "type_version")?;
+                let parent_turn_id = get_optional_u64(&body, "parent_turn_id")?.unwrap_or(0);
+                let payload_json = body
+                    .get("data")
+                    .or_else(|| body.get("payload"))
+                    .ok_or_else(|| {
+                        StoreError::InvalidInput("missing required field: data or payload".into())
+                    })?;
+
+                let payload_bytes = {
+                    let registry = registry.lock().unwrap();
+                    encode_http_payload(payload_json, &type_id, type_version, &registry)?
+                };
+
+                let hash = blake3::hash(&payload_bytes);
+                let (record, metadata) = {
+                    let mut store = store.lock().unwrap();
+                    store.append_turn(
+                        context_id,
+                        parent_turn_id,
+                        type_id.clone(),
+                        type_version,
+                        1, // msgpack
+                        0, // uncompressed
+                        payload_bytes.len() as u32,
+                        *hash.as_bytes(),
+                        &payload_bytes,
+                    )?
+                };
+
+                event_bus.publish(StoreEvent::TurnAppended {
+                    context_id: context_id.to_string(),
+                    turn_id: record.turn_id.to_string(),
+                    parent_turn_id: record.parent_turn_id.to_string(),
+                    depth: record.depth,
+                    declared_type_id: Some(type_id.clone()),
+                    declared_type_version: Some(type_version),
+                });
+
+                if let Some(meta) = metadata {
+                    event_bus.publish(StoreEvent::ContextMetadataUpdated {
+                        context_id: context_id.to_string(),
+                        client_tag: meta.client_tag,
+                        title: meta.title,
+                        labels: meta.labels,
+                        has_provenance: meta.provenance.is_some(),
+                    });
+
+                    if let Some(prov) = meta.provenance {
+                        if let Some(parent_context_id) = prov.parent_context_id {
+                            event_bus.publish(StoreEvent::ContextLinked {
+                                child_context_id: context_id.to_string(),
+                                parent_context_id: parent_context_id.to_string(),
+                                root_context_id: prov.root_context_id.map(|v| v.to_string()),
+                                spawn_reason: prov.spawn_reason,
+                            });
+                        }
+                    }
+                }
+
+                let resp = json!({
+                    "context_id": context_id.to_string(),
+                    "turn_id": record.turn_id.to_string(),
+                    "depth": record.depth,
+                    "content_hash": hex::encode(hash.as_bytes()),
+                });
+                let bytes = serde_json::to_vec(&resp)
+                    .map_err(|e| StoreError::InvalidInput(format!("json encode error: {e}")))?;
+                Ok((
+                    201,
+                    Response::from_data(bytes)
+                        .with_status_code(StatusCode(201))
                         .with_header(
                             Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
                                 .unwrap(),
@@ -1048,10 +1302,472 @@ fn write_sse_heartbeat<W: Write>(writer: &mut W) -> std::io::Result<()> {
     writer.flush()
 }
 
+fn context_to_json(
+    store: &mut Store,
+    session_tracker: &SessionTracker,
+    context_id: u64,
+    include_provenance: bool,
+    include_lineage: bool,
+) -> Result<JsonValue> {
+    let head = store.get_head(context_id)?;
+    let session = session_tracker.get_session_for_context(context_id);
+    let session_id = session.as_ref().map(|s| s.session_id);
+    let is_live = session.is_some();
+    let last_activity_at = session.as_ref().map(|s| s.last_activity_at);
+    let session_peer_addr = session.as_ref().and_then(|s| s.peer_addr.clone());
+
+    let stored_metadata = store.get_context_metadata(context_id);
+    let client_tag = stored_metadata
+        .as_ref()
+        .and_then(|m| m.client_tag.clone())
+        .or_else(|| session.as_ref().map(|s| s.client_tag.clone()))
+        .filter(|t| !t.is_empty());
+
+    let mut obj = json!({
+        "context_id": head.context_id.to_string(),
+        "head_turn_id": head.head_turn_id.to_string(),
+        "head_depth": head.head_depth,
+        "created_at_unix_ms": head.created_at_unix_ms,
+        "is_live": is_live,
+    });
+
+    if let Some(tag) = client_tag {
+        obj["client_tag"] = JsonValue::String(tag);
+    }
+    if let Some(sid) = session_id {
+        obj["session_id"] = JsonValue::String(sid.to_string());
+    }
+    if let Some(ts) = last_activity_at {
+        obj["last_activity_at"] = JsonValue::Number(ts.into());
+    }
+    if let Some(metadata) = &stored_metadata {
+        if let Some(title) = &metadata.title {
+            obj["title"] = JsonValue::String(title.clone());
+        }
+        if let Some(labels) = &metadata.labels {
+            obj["labels"] = serde_json::to_value(labels).unwrap_or(JsonValue::Null);
+        }
+    }
+
+    if include_provenance {
+        if let Some(ref metadata) = stored_metadata {
+            if let Some(ref prov) = metadata.provenance {
+                let mut prov_with_server_info = prov.clone();
+                if prov_with_server_info.client_address.is_none() {
+                    prov_with_server_info.client_address = session_peer_addr.clone();
+                }
+                if let Ok(prov_json) = serde_json::to_value(&prov_with_server_info) {
+                    obj["provenance"] = prov_json;
+                }
+            }
+        }
+    }
+
+    if include_lineage {
+        let (parent_context_id, root_context_id, spawn_reason) = stored_metadata
+            .as_ref()
+            .and_then(|m| m.provenance.as_ref())
+            .map(|p| {
+                (
+                    p.parent_context_id,
+                    p.root_context_id,
+                    p.spawn_reason.clone(),
+                )
+            })
+            .unwrap_or((None, None, None));
+
+        let child_context_ids = store.child_context_ids(context_id);
+        let child_context_ids_json: Vec<JsonValue> = child_context_ids
+            .iter()
+            .map(|id| JsonValue::String(id.to_string()))
+            .collect();
+
+        obj["lineage"] = json!({
+            "parent_context_id": parent_context_id.map(|v| v.to_string()),
+            "root_context_id": root_context_id.map(|v| v.to_string()),
+            "spawn_reason": spawn_reason,
+            "child_context_count": child_context_ids.len(),
+            "child_context_ids": child_context_ids_json,
+        });
+    }
+
+    Ok(obj)
+}
+
+fn parse_base_turn_id(
+    request: &mut tiny_http::Request,
+    default: u64,
+    required: bool,
+) -> Result<u64> {
+    let body = parse_json_body(request)?;
+    if let Some(value) = body.get("base_turn_id") {
+        parse_json_u64(value, "base_turn_id")
+    } else if required {
+        Err(StoreError::InvalidInput(
+            "missing required field: base_turn_id".into(),
+        ))
+    } else {
+        Ok(default)
+    }
+}
+
+fn parse_json_body(request: &mut tiny_http::Request) -> Result<JsonValue> {
+    let mut body = Vec::new();
+    request.as_reader().read_to_end(&mut body)?;
+    if body.is_empty() {
+        return Ok(JsonValue::Object(Map::new()));
+    }
+    if body.iter().all(|b| b.is_ascii_whitespace()) {
+        return Ok(JsonValue::Object(Map::new()));
+    }
+    serde_json::from_slice(&body)
+        .map_err(|e| StoreError::InvalidInput(format!("invalid json: {e}")))
+}
+
+fn parse_json_u64(value: &JsonValue, field_name: &str) -> Result<u64> {
+    match value {
+        JsonValue::String(s) => s
+            .parse::<u64>()
+            .map_err(|_| StoreError::InvalidInput(format!("invalid {field_name}"))),
+        JsonValue::Number(n) => n
+            .as_u64()
+            .or_else(|| {
+                n.as_i64()
+                    .and_then(|i| if i >= 0 { Some(i as u64) } else { None })
+            })
+            .ok_or_else(|| StoreError::InvalidInput(format!("invalid {field_name}"))),
+        _ => Err(StoreError::InvalidInput(format!("invalid {field_name}"))),
+    }
+}
+
+fn get_required_string(body: &JsonValue, key: &str) -> Result<String> {
+    body.get(key)
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| StoreError::InvalidInput(format!("missing required field: {key}")))
+}
+
+fn get_required_u32(body: &JsonValue, key: &str) -> Result<u32> {
+    let value = body
+        .get(key)
+        .ok_or_else(|| StoreError::InvalidInput(format!("missing required field: {key}")))?;
+    let parsed = parse_json_u64(value, key)?;
+    if parsed > u32::MAX as u64 {
+        return Err(StoreError::InvalidInput(format!("{key} out of range")));
+    }
+    Ok(parsed as u32)
+}
+
+fn get_optional_u64(body: &JsonValue, key: &str) -> Result<Option<u64>> {
+    match body.get(key) {
+        Some(value) => parse_json_u64(value, key).map(Some),
+        None => Ok(None),
+    }
+}
+
+fn extract_http_client_tag(request: &tiny_http::Request) -> String {
+    for name in ["X-CXDB-Client-Tag", "X-Client-Tag"] {
+        if let Some(header) = request.headers().iter().find(|h| h.field.equiv(name)) {
+            let value = header.value.as_str().trim();
+            if !value.is_empty() {
+                return value.to_string();
+            }
+        }
+    }
+    "http".to_string()
+}
+
+fn encode_http_payload(
+    payload_json: &JsonValue,
+    type_id: &str,
+    type_version: u32,
+    registry: &Registry,
+) -> Result<Vec<u8>> {
+    if let Some(desc) = registry.get_type_version(type_id, type_version) {
+        if let JsonValue::Object(obj) = payload_json {
+            let value = encode_object_with_descriptor(obj, desc, registry)?;
+            let mut out = Vec::new();
+            rmpv::encode::write_value(&mut out, &value)
+                .map_err(|e| StoreError::InvalidInput(format!("msgpack encode error: {e}")))?;
+            return Ok(out);
+        }
+    }
+
+    let value = json_to_msgpack_value(payload_json)?;
+    let mut out = Vec::new();
+    rmpv::encode::write_value(&mut out, &value)
+        .map_err(|e| StoreError::InvalidInput(format!("msgpack encode error: {e}")))?;
+    Ok(out)
+}
+
+fn encode_object_with_descriptor(
+    obj: &Map<String, JsonValue>,
+    desc: &TypeVersionSpec,
+    registry: &Registry,
+) -> Result<MsgpackValue> {
+    let mut entries: Vec<(MsgpackValue, MsgpackValue)> = Vec::new();
+
+    let mut tagged_fields: Vec<(u64, &FieldSpec)> =
+        desc.fields.iter().map(|(t, f)| (*t, f)).collect();
+    tagged_fields.sort_unstable_by_key(|(tag, _)| *tag);
+
+    for (tag, field) in &tagged_fields {
+        if let Some(value) = obj.get(&field.name) {
+            entries.push((
+                MsgpackValue::from(*tag),
+                encode_field_value(value, field, registry)?,
+            ));
+        } else if !field.optional {
+            return Err(StoreError::InvalidInput(format!(
+                "missing required field: {}",
+                field.name
+            )));
+        }
+    }
+
+    // Preserve unknown fields instead of silently dropping them.
+    for (key, value) in obj {
+        if tagged_fields
+            .iter()
+            .any(|(_, field)| field.name.as_str() == key.as_str())
+        {
+            continue;
+        }
+        let key_value = key
+            .parse::<u64>()
+            .map(MsgpackValue::from)
+            .unwrap_or_else(|_| MsgpackValue::String(key.clone().into()));
+        entries.push((key_value, json_to_msgpack_value(value)?));
+    }
+
+    Ok(MsgpackValue::Map(entries))
+}
+
+fn encode_field_value(
+    value: &JsonValue,
+    field: &FieldSpec,
+    registry: &Registry,
+) -> Result<MsgpackValue> {
+    if value.is_null() {
+        return Ok(MsgpackValue::Nil);
+    }
+
+    if let Some(enum_ref) = &field.enum_ref {
+        if let Some(num) = parse_json_u64_opt(value) {
+            return Ok(MsgpackValue::from(num));
+        }
+        if let Some(label) = value.as_str() {
+            if let Some(enum_map) = registry.get_enum(enum_ref) {
+                if let Some((num_str, _)) = enum_map.iter().find(|(_, v)| v.as_str() == label) {
+                    let num = num_str.parse::<u64>().map_err(|_| {
+                        StoreError::InvalidInput(format!("invalid enum value for {}", field.name))
+                    })?;
+                    return Ok(MsgpackValue::from(num));
+                }
+            }
+            return Err(StoreError::InvalidInput(format!(
+                "unknown enum label for {}",
+                field.name
+            )));
+        }
+    }
+
+    match field.field_type.as_str() {
+        "string" => value
+            .as_str()
+            .map(|s| MsgpackValue::String(s.to_string().into()))
+            .ok_or_else(|| StoreError::InvalidInput(format!("expected string for {}", field.name))),
+        "bool" => value
+            .as_bool()
+            .map(MsgpackValue::Boolean)
+            .ok_or_else(|| StoreError::InvalidInput(format!("expected bool for {}", field.name))),
+        "u64" | "uint64" | "u32" | "uint32" | "u8" | "uint8" => parse_json_u64_opt(value)
+            .map(MsgpackValue::from)
+            .ok_or_else(|| {
+                StoreError::InvalidInput(format!("expected integer for {}", field.name))
+            }),
+        "int64" | "int32" => parse_json_i64_opt(value)
+            .map(MsgpackValue::from)
+            .ok_or_else(|| {
+                StoreError::InvalidInput(format!("expected integer for {}", field.name))
+            }),
+        "bytes" | "typed_blob" => parse_bytes_value(value).map(MsgpackValue::Binary),
+        "array" => {
+            let items = value.as_array().ok_or_else(|| {
+                StoreError::InvalidInput(format!("expected array for {}", field.name))
+            })?;
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                let encoded = match &field.items {
+                    Some(ItemsSpec::Simple(item_type)) => encode_value_for_type(item, item_type)?,
+                    Some(ItemsSpec::Ref(type_ref)) => encode_ref_value(item, type_ref, registry)?,
+                    None => json_to_msgpack_value(item)?,
+                };
+                out.push(encoded);
+            }
+            Ok(MsgpackValue::Array(out))
+        }
+        "ref" => {
+            if let Some(type_ref) = &field.type_ref {
+                encode_ref_value(value, type_ref, registry)
+            } else {
+                json_to_msgpack_value(value)
+            }
+        }
+        _ => encode_value_for_type(value, &field.field_type),
+    }
+}
+
+fn encode_ref_value(
+    value: &JsonValue,
+    type_ref: &str,
+    registry: &Registry,
+) -> Result<MsgpackValue> {
+    let obj = value
+        .as_object()
+        .ok_or_else(|| StoreError::InvalidInput(format!("expected object for ref {type_ref}")))?;
+    let desc = registry
+        .get_latest_type_version(type_ref)
+        .ok_or_else(|| StoreError::NotFound("type descriptor".into()))?;
+    encode_object_with_descriptor(obj, desc, registry)
+}
+
+fn encode_value_for_type(value: &JsonValue, field_type: &str) -> Result<MsgpackValue> {
+    match field_type {
+        "string" => value
+            .as_str()
+            .map(|s| MsgpackValue::String(s.to_string().into()))
+            .ok_or_else(|| StoreError::InvalidInput("expected string".into())),
+        "bool" => value
+            .as_bool()
+            .map(MsgpackValue::Boolean)
+            .ok_or_else(|| StoreError::InvalidInput("expected bool".into())),
+        "u64" | "uint64" | "u32" | "uint32" | "u8" | "uint8" => parse_json_u64_opt(value)
+            .map(MsgpackValue::from)
+            .ok_or_else(|| StoreError::InvalidInput("expected integer".into())),
+        "int64" | "int32" | "unix_ms" | "time_ms" | "timestamp_ms" => parse_json_i64_opt(value)
+            .map(MsgpackValue::from)
+            .ok_or_else(|| StoreError::InvalidInput("expected integer".into())),
+        "bytes" | "typed_blob" => parse_bytes_value(value).map(MsgpackValue::Binary),
+        _ => json_to_msgpack_value(value),
+    }
+}
+
+fn parse_json_u64_opt(value: &JsonValue) -> Option<u64> {
+    match value {
+        JsonValue::String(s) => s.parse::<u64>().ok(),
+        JsonValue::Number(n) => n.as_u64().or_else(|| {
+            n.as_i64()
+                .and_then(|i| if i >= 0 { Some(i as u64) } else { None })
+        }),
+        _ => None,
+    }
+}
+
+fn parse_json_i64_opt(value: &JsonValue) -> Option<i64> {
+    match value {
+        JsonValue::String(s) => s.parse::<i64>().ok(),
+        JsonValue::Number(n) => n
+            .as_i64()
+            .or_else(|| n.as_u64().and_then(|u| i64::try_from(u).ok())),
+        _ => None,
+    }
+}
+
+fn parse_bytes_value(value: &JsonValue) -> Result<Vec<u8>> {
+    match value {
+        JsonValue::String(s) => {
+            if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(s) {
+                return Ok(bytes);
+            }
+            if let Ok(bytes) = hex::decode(s) {
+                return Ok(bytes);
+            }
+            Ok(s.as_bytes().to_vec())
+        }
+        JsonValue::Array(arr) => {
+            let mut out = Vec::with_capacity(arr.len());
+            for item in arr {
+                let num = parse_json_u64_opt(item)
+                    .ok_or_else(|| StoreError::InvalidInput("invalid byte array value".into()))?;
+                if num > 255 {
+                    return Err(StoreError::InvalidInput("byte out of range".into()));
+                }
+                out.push(num as u8);
+            }
+            Ok(out)
+        }
+        JsonValue::Object(obj) => {
+            if let Some(JsonValue::String(b64)) = obj.get("base64") {
+                return base64::engine::general_purpose::STANDARD
+                    .decode(b64)
+                    .map_err(|e| StoreError::InvalidInput(format!("invalid base64 bytes: {e}")));
+            }
+            if let Some(JsonValue::String(hex_str)) = obj.get("hex") {
+                return hex::decode(hex_str)
+                    .map_err(|e| StoreError::InvalidInput(format!("invalid hex bytes: {e}")));
+            }
+            Err(StoreError::InvalidInput(
+                "bytes object must contain base64 or hex".into(),
+            ))
+        }
+        _ => Err(StoreError::InvalidInput("invalid bytes value".into())),
+    }
+}
+
+fn json_to_msgpack_value(value: &JsonValue) -> Result<MsgpackValue> {
+    match value {
+        JsonValue::Null => Ok(MsgpackValue::Nil),
+        JsonValue::Bool(v) => Ok(MsgpackValue::Boolean(*v)),
+        JsonValue::Number(n) => {
+            if let Some(v) = n.as_i64() {
+                Ok(MsgpackValue::from(v))
+            } else if let Some(v) = n.as_u64() {
+                Ok(MsgpackValue::from(v))
+            } else if let Some(v) = n.as_f64() {
+                Ok(MsgpackValue::from(v))
+            } else {
+                Err(StoreError::InvalidInput("invalid numeric value".into()))
+            }
+        }
+        JsonValue::String(s) => Ok(MsgpackValue::String(s.clone().into())),
+        JsonValue::Array(arr) => {
+            let mut out = Vec::with_capacity(arr.len());
+            for item in arr {
+                out.push(json_to_msgpack_value(item)?);
+            }
+            Ok(MsgpackValue::Array(out))
+        }
+        JsonValue::Object(obj) => {
+            let mut keys: Vec<&String> = obj.keys().collect();
+            keys.sort();
+            let mut out = Vec::with_capacity(obj.len());
+            for key in keys {
+                let key_value = key
+                    .parse::<u64>()
+                    .map(MsgpackValue::from)
+                    .unwrap_or_else(|_| MsgpackValue::String(key.clone().into()));
+                let value = obj
+                    .get(key)
+                    .ok_or_else(|| StoreError::InvalidInput("missing object key".into()))?;
+                out.push((key_value, json_to_msgpack_value(value)?));
+            }
+            Ok(MsgpackValue::Map(out))
+        }
+    }
+}
+
 fn parse_query(query: &str) -> HashMap<String, String> {
     url::form_urlencoded::parse(query.as_bytes())
         .into_owned()
         .collect()
+}
+
+fn unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 fn map_error(err: &StoreError) -> (u16, String) {
@@ -1059,6 +1775,8 @@ fn map_error(err: &StoreError) -> (u16, String) {
         StoreError::NotFound(msg) => {
             if msg.contains("type descriptor") {
                 (424, msg.clone())
+            } else if msg.contains("parent turn") || msg.contains("base turn") {
+                (409, msg.clone())
             } else {
                 (404, msg.clone())
             }
@@ -1152,5 +1870,85 @@ fn guess_content_type(path: &str) -> &'static str {
         "tar" => "application/x-tar",
         "gz" => "application/gzip",
         _ => "application/octet-stream",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn encode_http_payload_uses_registry_tags_when_descriptor_exists() {
+        let dir = tempdir().expect("tempdir");
+        let mut registry = Registry::open(dir.path()).expect("open registry");
+        let bundle = serde_json::json!({
+            "registry_version": 1,
+            "bundle_id": "test-bundle#1",
+            "types": {
+                "com.example.Message": {
+                    "versions": {
+                        "1": {
+                            "fields": {
+                                "1": { "name": "role", "type": "string" },
+                                "2": { "name": "text", "type": "string" }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        let raw = serde_json::to_vec(&bundle).expect("bundle json");
+        registry
+            .put_bundle("test-bundle#1", &raw)
+            .expect("put bundle");
+
+        let payload = serde_json::json!({
+            "role": "user",
+            "text": "hello",
+        });
+        let encoded = encode_http_payload(&payload, "com.example.Message", 1, &registry)
+            .expect("encode payload");
+
+        let value =
+            rmpv::decode::read_value(&mut std::io::Cursor::new(&encoded)).expect("decode msgpack");
+        let map = match value {
+            MsgpackValue::Map(m) => m,
+            other => panic!("expected map, got {other:?}"),
+        };
+
+        assert!(map
+            .iter()
+            .any(|(k, v)| *k == MsgpackValue::from(1) && *v == MsgpackValue::from("user")));
+        assert!(map
+            .iter()
+            .any(|(k, v)| *k == MsgpackValue::from(2) && *v == MsgpackValue::from("hello")));
+    }
+
+    #[test]
+    fn encode_http_payload_falls_back_to_plain_json_shape_without_descriptor() {
+        let dir = tempdir().expect("tempdir");
+        let registry = Registry::open(dir.path()).expect("open registry");
+        let payload = serde_json::json!({
+            "role": "user",
+            "text": "hello",
+        });
+
+        let encoded =
+            encode_http_payload(&payload, "com.example.UnknownType", 1, &registry).expect("encode");
+
+        let value =
+            rmpv::decode::read_value(&mut std::io::Cursor::new(&encoded)).expect("decode msgpack");
+        let map = match value {
+            MsgpackValue::Map(m) => m,
+            other => panic!("expected map, got {other:?}"),
+        };
+
+        assert!(map.iter().any(|(k, v)| {
+            *k == MsgpackValue::from("role") && *v == MsgpackValue::from("user")
+        }));
+        assert!(map.iter().any(|(k, v)| {
+            *k == MsgpackValue::from("text") && *v == MsgpackValue::from("hello")
+        }));
     }
 }

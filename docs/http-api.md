@@ -26,7 +26,9 @@ GET /v1/contexts
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `limit` | int | 100 | Max contexts to return |
-| `offset` | int | 0 | Pagination offset |
+| `tag` | string | - | Filter by exact client tag |
+| `include_provenance` | bool | false | Include provenance in each context |
+| `include_lineage` | bool | false | Include parent/root/children lineage summary |
 
 **Response:**
 
@@ -50,6 +52,13 @@ GET /v1/contexts
 GET /v1/contexts/:context_id
 ```
 
+**Query Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `include_provenance` | bool | true | Include provenance block |
+| `include_lineage` | bool | true | Include lineage block with parent/root/children |
+
 **Response:**
 
 ```json
@@ -65,10 +74,31 @@ GET /v1/contexts/:context_id
 
 - `404 Not Found` - Context doesn't exist
 
+### List Child Contexts
+
+```http
+GET /v1/contexts/:context_id/children
+```
+
+**Query Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `recursive` | bool | false | Include all descendants, not just direct children |
+| `limit` | int | 256 | Max child contexts to return |
+| `include_provenance` | bool | true | Include provenance in each child |
+| `include_lineage` | bool | true | Include lineage in each child |
+
 ### Create Context
 
 ```http
 POST /v1/contexts/create
+```
+
+Alias:
+
+```http
+POST /v1/contexts
 ```
 
 **Request Body:**
@@ -235,6 +265,12 @@ Use `next_before_turn_id` from the previous response to continue paging.
 POST /v1/contexts/:context_id/append
 ```
 
+Alias:
+
+```http
+POST /v1/contexts/:context_id/turns
+```
+
 **Request Body:**
 
 ```json
@@ -254,9 +290,12 @@ POST /v1/contexts/:context_id/append
 |-------|------|----------|-------------|
 | `type_id` | string | Yes | Type identifier |
 | `type_version` | int | Yes | Type version |
-| `data` | object | Yes | Turn payload (will be encoded as msgpack) |
+| `data` | object | Yes* | Turn payload (will be encoded as msgpack) |
+| `payload` | object | Yes* | Alias for `data` (for compatibility) |
 | `parent_turn_id` | string | No | Parent turn (default: current head) |
 | `idempotency_key` | string | No | For safe retries |
+
+\*At least one of `data` or `payload` is required.
 
 **Response:**
 
@@ -275,7 +314,7 @@ POST /v1/contexts/:context_id/append
 - `409 Conflict` - Invalid parent_turn_id
 - `422 Unprocessable Entity` - Invalid data or missing type
 
-**Note:** The HTTP API accepts JSON `data` and converts it to msgpack internally. Numeric field tags are derived from the type registry. For maximum control over msgpack encoding, use the binary protocol.
+**Note:** The HTTP API accepts JSON payloads and converts them to msgpack internally. If a type descriptor exists, numeric tags are derived from the registry. If no descriptor exists, the JSON structure is still persisted as msgpack (string/numeric keys preserved). For maximum control over encoding, use the binary protocol.
 
 ## Registry
 
