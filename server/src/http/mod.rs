@@ -13,7 +13,7 @@ use tiny_http::{Header, Method, Response, Server, StatusCode};
 use url::Url;
 
 use crate::error::{Result, StoreError};
-use crate::events::EventBus;
+use crate::events::{EventBus, StoreEvent};
 use crate::fs_store::EntryKind;
 use crate::metrics::{Metrics, SessionTracker};
 use crate::projection::{BytesRender, EnumRender, RenderOptions, TimeRender, U64Format};
@@ -58,6 +58,7 @@ fn handle_request(
     event_bus: &Arc<EventBus>,
 ) -> Result<()> {
     let start = Instant::now();
+    let request_path = request.url().to_string();
 
     // Check for SSE request early - it needs special handling
     let url_str = format!("http://localhost{}", request.url());
@@ -700,6 +701,26 @@ fn handle_request(
                         ),
                 ))
             }
+            (Method::Get, ["v1", "errors"]) => {
+                let params = parse_query(url.query().unwrap_or(""));
+                let limit: usize = params
+                    .get("limit")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(50)
+                    .min(256);
+                let entries = metrics.recent_errors(limit);
+                let bytes = serde_json::to_vec(&json!({ "errors": entries }))
+                    .map_err(|e| StoreError::InvalidInput(format!("json encode error: {e}")))?;
+                Ok((
+                    200,
+                    Response::from_data(bytes)
+                        .with_status_code(StatusCode(200))
+                        .with_header(
+                            Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+                                .unwrap(),
+                        ),
+                ))
+            }
             // Filesystem snapshot: list directory entries
             (Method::Get, ["v1", "turns", turn_id, "fs"]) => {
                 let turn_id: u64 = turn_id
@@ -904,7 +925,17 @@ fn handle_request(
         Err(err) => {
             let (status, message) = map_error(&err);
             metrics.record_http(status, start.elapsed());
-            metrics.record_error("http");
+            metrics.record_error("http", status, &message, Some(&request_path));
+            event_bus.publish(StoreEvent::ErrorOccurred {
+                timestamp_ms: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0),
+                kind: "http".to_string(),
+                status_code: status,
+                message: message.clone(),
+                path: Some(request_path.clone()),
+            });
             let bytes = serde_json::to_vec(&json!({"error": {"code": status, "message": message}}))
                 .map_err(|e| StoreError::InvalidInput(format!("json encode error: {e}")))?;
             let response = Response::from_data(bytes)

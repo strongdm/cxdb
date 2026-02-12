@@ -1,7 +1,7 @@
 'use client';
 
 import { useMemo } from 'react';
-import { Folder, MessageSquare, RefreshCw, User, UserMinus } from 'lucide-react';
+import { AlertCircle, Folder, MessageSquare, RefreshCw, User, UserMinus } from 'lucide-react';
 import type { ActivityItem, StoreEvent } from '@/types';
 import { LiveTimestamp } from './LiveTimestamp';
 import { PresenceIndicator } from './PresenceIndicator';
@@ -149,6 +149,12 @@ function getEventDisplay(event: StoreEvent): {
         label: event.data.title ? `Updated: "${event.data.title}"` : 'Metadata updated',
         contextId: event.data.context_id,
         clientTag: event.data.client_tag,
+      };
+
+    case 'error_occurred':
+      return {
+        icon: <AlertCircle size={12} />,
+        label: `${event.data.kind} ${event.data.status_code}: ${event.data.message}`,
       };
   }
 }

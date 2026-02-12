@@ -152,6 +152,7 @@ impl SessionTracker {
 }
 
 const MAX_LATENCY_SAMPLES: usize = 2048;
+const MAX_ERROR_ENTRIES: usize = 256;
 
 #[derive(Debug, Clone)]
 pub struct MetricsConfig {
@@ -202,6 +203,7 @@ pub struct Metrics {
     http_errors_total: AtomicU64,
     errors_total: AtomicU64,
     errors_by_type: Mutex<HashMap<String, u64>>,
+    recent_errors: Mutex<VecDeque<ErrorEntry>>,
 
     rates: Mutex<RateStore>,
     latencies: Mutex<LatencyStore>,
@@ -229,6 +231,7 @@ impl Metrics {
             http_errors_total: AtomicU64::new(0),
             errors_total: AtomicU64::new(0),
             errors_by_type: Mutex::new(HashMap::new()),
+            recent_errors: Mutex::new(VecDeque::new()),
             rates: Mutex::new(RateStore::new()),
             latencies: Mutex::new(LatencyStore::new()),
             system: Mutex::new(System::new()),
@@ -309,11 +312,33 @@ impl Metrics {
             .push(duration_to_ms(duration));
     }
 
-    pub fn record_error(&self, kind: &str) {
+    pub fn record_error(&self, kind: &str, status_code: u16, message: &str, path: Option<&str>) {
         self.errors_total.fetch_add(1, Ordering::Relaxed);
-        let mut map = self.errors_by_type.lock().unwrap();
-        let entry = map.entry(kind.to_string()).or_insert(0);
-        *entry += 1;
+        {
+            let mut map = self.errors_by_type.lock().unwrap();
+            let count = map.entry(kind.to_string()).or_insert(0);
+            *count += 1;
+        }
+        {
+            let entry = ErrorEntry {
+                timestamp_ms: unix_ms(),
+                kind: kind.to_string(),
+                status_code,
+                message: message.to_string(),
+                path: path.map(|s| s.to_string()),
+            };
+            let mut buf = self.recent_errors.lock().unwrap();
+            if buf.len() >= MAX_ERROR_ENTRIES {
+                buf.pop_front();
+            }
+            buf.push_back(entry);
+        }
+    }
+
+    /// Returns the most recent errors, newest first. `limit` caps the result count.
+    pub fn recent_errors(&self, limit: usize) -> Vec<ErrorEntry> {
+        let buf = self.recent_errors.lock().unwrap();
+        buf.iter().rev().take(limit).cloned().collect()
     }
 
     pub fn snapshot(&self, store: &mut Store, registry: &Registry) -> MetricsSnapshot {
@@ -607,6 +632,17 @@ pub struct PerfMetrics {
 pub struct ErrorMetrics {
     pub total: u64,
     pub by_type: HashMap<String, u64>,
+}
+
+/// A single recorded error with context for debugging.
+#[derive(Debug, Clone, Serialize)]
+pub struct ErrorEntry {
+    pub timestamp_ms: u64,
+    pub kind: String,
+    pub status_code: u16,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -914,5 +950,63 @@ mod tests {
         {
             let _ = (total, free); // sysinfo might match root mount
         }
+    }
+
+    #[test]
+    fn error_ring_buffer_stores_entries() {
+        let m = Metrics::new(PathBuf::from("/tmp"));
+        m.record_error("http", 404, "not found", Some("/v1/foo"));
+        m.record_error("binary", 500, "corrupt", None);
+
+        let recent = m.recent_errors(10);
+        assert_eq!(recent.len(), 2);
+        // Newest first
+        assert_eq!(recent[0].kind, "binary");
+        assert_eq!(recent[0].status_code, 500);
+        assert_eq!(recent[1].kind, "http");
+        assert_eq!(recent[1].path, Some("/v1/foo".to_string()));
+    }
+
+    #[test]
+    fn error_ring_buffer_evicts_oldest() {
+        let m = Metrics::new(PathBuf::from("/tmp"));
+        for i in 0..MAX_ERROR_ENTRIES + 10 {
+            m.record_error("http", 404, &format!("error-{i}"), None);
+        }
+        let recent = m.recent_errors(MAX_ERROR_ENTRIES);
+        assert_eq!(recent.len(), MAX_ERROR_ENTRIES);
+        // The oldest entries (0..9) should have been evicted
+        assert!(recent.last().unwrap().message.contains("error-10"));
+        assert!(recent
+            .first()
+            .unwrap()
+            .message
+            .contains(&format!("error-{}", MAX_ERROR_ENTRIES + 9)));
+    }
+
+    #[test]
+    fn error_ring_buffer_respects_limit() {
+        let m = Metrics::new(PathBuf::from("/tmp"));
+        for i in 0..20 {
+            m.record_error("http", 400, &format!("err-{i}"), None);
+        }
+        let recent = m.recent_errors(5);
+        assert_eq!(recent.len(), 5);
+        // Should be the 5 most recent
+        assert!(recent[0].message.contains("err-19"));
+        assert!(recent[4].message.contains("err-15"));
+    }
+
+    #[test]
+    fn record_error_increments_counters() {
+        let m = Metrics::new(PathBuf::from("/tmp"));
+        m.record_error("http", 404, "not found", None);
+        m.record_error("http", 500, "internal", None);
+        m.record_error("binary", 422, "bad input", None);
+
+        assert_eq!(m.errors_total.load(Ordering::Relaxed), 3);
+        let by_type = m.errors_by_type.lock().unwrap();
+        assert_eq!(by_type["http"], 2);
+        assert_eq!(by_type["binary"], 1);
     }
 }

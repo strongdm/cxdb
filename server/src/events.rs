@@ -56,6 +56,15 @@ pub enum StoreEvent {
         client_tag: String,
         contexts: Vec<String>,
     },
+    /// An error occurred (HTTP or binary protocol).
+    ErrorOccurred {
+        timestamp_ms: u64,
+        kind: String,
+        status_code: u16,
+        message: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+    },
 }
 
 impl StoreEvent {
@@ -67,6 +76,7 @@ impl StoreEvent {
             StoreEvent::TurnAppended { .. } => "turn_appended",
             StoreEvent::ClientConnected { .. } => "client_connected",
             StoreEvent::ClientDisconnected { .. } => "client_disconnected",
+            StoreEvent::ErrorOccurred { .. } => "error_occurred",
         };
 
         // Serialize without the type tag (frontend expects flat structure)
@@ -142,6 +152,24 @@ impl StoreEvent {
                 "client_tag": client_tag,
                 "contexts": contexts,
             }),
+            StoreEvent::ErrorOccurred {
+                timestamp_ms,
+                kind,
+                status_code,
+                message,
+                path,
+            } => {
+                let mut obj = serde_json::json!({
+                    "timestamp_ms": timestamp_ms,
+                    "kind": kind,
+                    "status_code": status_code,
+                    "message": message,
+                });
+                if let Some(p) = path {
+                    obj["path"] = serde_json::Value::String(p.clone());
+                }
+                obj
+            }
         };
 
         (event_type, data.to_string())
