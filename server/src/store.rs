@@ -602,17 +602,9 @@ fn extract_context_metadata(payload: &[u8]) -> Option<ContextMetadata> {
     };
 
     // Find key 30 (context_metadata)
-    let context_metadata_value = map.iter().find_map(|(k, v)| {
-        let key = match k {
-            Value::Integer(i) => i.as_u64()?,
-            _ => return None,
-        };
-        if key == 30 {
-            Some(v)
-        } else {
-            None
-        }
-    })?;
+    let context_metadata_value =
+        map.iter()
+            .find_map(|(k, v)| if key_to_tag(k)? == 30 { Some(v) } else { None })?;
 
     let metadata_map = match context_metadata_value {
         Value::Map(m) => m,
@@ -622,9 +614,9 @@ fn extract_context_metadata(payload: &[u8]) -> Option<ContextMetadata> {
     let mut metadata = ContextMetadata::default();
 
     for (k, v) in metadata_map.iter() {
-        let key = match k {
-            Value::Integer(i) => i.as_u64().unwrap_or(0),
-            _ => continue,
+        let key = match key_to_tag(k) {
+            Some(t) => t,
+            None => continue,
         };
 
         match key {
@@ -685,9 +677,9 @@ fn extract_provenance(prov_map: &[(Value, Value)]) -> Provenance {
     let mut prov = Provenance::default();
 
     for (k, v) in prov_map.iter() {
-        let key = match k {
-            Value::Integer(i) => i.as_u64().unwrap_or(0),
-            _ => continue,
+        let key = match key_to_tag(k) {
+            Some(t) => t,
+            None => continue,
         };
 
         match key {
@@ -741,6 +733,20 @@ fn extract_provenance(prov_map: &[(Value, Value)]) -> Provenance {
     prov
 }
 
+/// Interpret a msgpack map key as a numeric tag.
+/// Accepts both integer keys and string-encoded integers (e.g., "30").
+/// Matches the projection layer's key_to_tag behavior (CLIENT_SPEC.md §3.1).
+fn key_to_tag(key: &Value) -> Option<u64> {
+    match key {
+        Value::Integer(int) => int.as_u64().or_else(|| {
+            int.as_i64()
+                .and_then(|v| if v >= 0 { Some(v as u64) } else { None })
+        }),
+        Value::String(s) => s.as_str()?.parse::<u64>().ok(),
+        _ => None,
+    }
+}
+
 fn extract_string(v: &Value) -> Option<String> {
     if let Value::String(s) = v {
         s.as_str().map(|s| s.to_string())
@@ -782,5 +788,103 @@ fn extract_string_map(v: &Value) -> Option<HashMap<String, String>> {
         }
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rmpv::Value;
+
+    fn str_val(s: &str) -> Value {
+        Value::String(s.into())
+    }
+
+    fn int_val(n: u64) -> Value {
+        Value::Integer(rmpv::Integer::from(n))
+    }
+
+    #[test]
+    fn key_to_tag_accepts_integer_keys() {
+        assert_eq!(key_to_tag(&int_val(30)), Some(30));
+        assert_eq!(key_to_tag(&int_val(0)), Some(0));
+        assert_eq!(key_to_tag(&int_val(80)), Some(80));
+    }
+
+    #[test]
+    fn key_to_tag_accepts_string_encoded_integers() {
+        assert_eq!(key_to_tag(&str_val("30")), Some(30));
+        assert_eq!(key_to_tag(&str_val("1")), Some(1));
+        assert_eq!(key_to_tag(&str_val("80")), Some(80));
+        assert_eq!(key_to_tag(&str_val("0")), Some(0));
+    }
+
+    #[test]
+    fn key_to_tag_rejects_non_numeric_strings() {
+        assert_eq!(key_to_tag(&str_val("hello")), None);
+        assert_eq!(key_to_tag(&str_val("")), None);
+        assert_eq!(key_to_tag(&str_val("-1")), None);
+    }
+
+    #[test]
+    fn key_to_tag_rejects_other_types() {
+        assert_eq!(key_to_tag(&Value::Boolean(true)), None);
+        assert_eq!(key_to_tag(&Value::Nil), None);
+    }
+
+    /// Build a msgpack payload where the outer map uses string keys and
+    /// the context_metadata inner maps also use string keys — matching
+    /// what Go's msgpack encoder produces.
+    fn encode_context_metadata_with_string_keys(
+        client_tag: &str,
+        service_name: &str,
+        correlation_id: &str,
+    ) -> Vec<u8> {
+        let provenance = Value::Map(vec![
+            (str_val("40"), str_val(service_name)),
+            (str_val("12"), str_val(correlation_id)),
+        ]);
+        let context_metadata = Value::Map(vec![
+            (str_val("1"), str_val(client_tag)),
+            (str_val("10"), provenance),
+        ]);
+        let payload = Value::Map(vec![(str_val("30"), context_metadata)]);
+        let mut buf = Vec::new();
+        rmpv::encode::write_value(&mut buf, &payload).unwrap();
+        buf
+    }
+
+    fn encode_context_metadata_with_integer_keys(client_tag: &str, service_name: &str) -> Vec<u8> {
+        let provenance = Value::Map(vec![(int_val(40), str_val(service_name))]);
+        let context_metadata = Value::Map(vec![
+            (int_val(1), str_val(client_tag)),
+            (int_val(10), provenance),
+        ]);
+        let payload = Value::Map(vec![(int_val(30), context_metadata)]);
+        let mut buf = Vec::new();
+        rmpv::encode::write_value(&mut buf, &payload).unwrap();
+        buf
+    }
+
+    #[test]
+    fn extract_context_metadata_with_string_keys() {
+        let payload =
+            encode_context_metadata_with_string_keys("kilroy/run-123", "kilroy", "run-123");
+        let meta = extract_context_metadata(&payload).expect("should extract metadata");
+        assert_eq!(meta.client_tag.as_deref(), Some("kilroy/run-123"));
+
+        let prov = meta.provenance.expect("should have provenance");
+        assert_eq!(prov.service_name.as_deref(), Some("kilroy"));
+        assert_eq!(prov.correlation_id.as_deref(), Some("run-123"));
+    }
+
+    #[test]
+    fn extract_context_metadata_with_integer_keys() {
+        let payload = encode_context_metadata_with_integer_keys("test-tag", "my-service");
+        let meta = extract_context_metadata(&payload).expect("should extract metadata");
+        assert_eq!(meta.client_tag.as_deref(), Some("test-tag"));
+
+        let prov = meta.provenance.expect("should have provenance");
+        assert_eq!(prov.service_name.as_deref(), Some("my-service"));
     }
 }
