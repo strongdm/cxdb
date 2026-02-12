@@ -382,8 +382,15 @@ fn handle_client(
                 stream.flush()?;
             }
             Err(err) => {
-                metrics.record_error("binary");
                 let (code, detail) = map_error(&err);
+                metrics.record_error("binary", code as u16, &detail, None);
+                event_bus.publish(StoreEvent::ErrorOccurred {
+                    timestamp_ms: unix_ms(),
+                    kind: "binary".to_string(),
+                    status_code: code as u16,
+                    message: detail.clone(),
+                    path: None,
+                });
                 let payload = encode_error(code, &detail)?;
                 write_frame(&mut stream, MsgType::Error as u16, 0, req_id, &payload)?;
                 stream.flush()?;

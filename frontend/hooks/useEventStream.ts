@@ -10,6 +10,7 @@ import type {
   TurnAppendedEvent,
   ClientConnectedEvent,
   ClientDisconnectedEvent,
+  ErrorOccurredEvent,
 } from '@/types';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || '/v1';
@@ -177,6 +178,15 @@ export function useEventStream(options: UseEventStreamOptions = {}): UseEventStr
             handleEvent({ type: 'client_disconnected', data });
           } catch (err) {
             console.error('Failed to parse client_disconnected event:', err);
+          }
+        });
+
+        eventSource.addEventListener('error_occurred', (e: MessageEvent) => {
+          try {
+            const data: ErrorOccurredEvent = JSON.parse(e.data);
+            handleEvent({ type: 'error_occurred', data });
+          } catch (err) {
+            console.error('Failed to parse error_occurred event:', err);
           }
         });
       } catch (err) {
