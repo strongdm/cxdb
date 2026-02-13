@@ -67,6 +67,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+## SSE subscriptions
+
+```rust
+use cxdb::{subscribe_events, RequestContext};
+
+fn main() {
+    let ctx = RequestContext::background();
+    let (events, errs) = subscribe_events(&ctx, "http://127.0.0.1:9010/v1/events", Vec::new());
+    for ev in events.iter() {
+        println!("event: {}", ev.event_type);
+    }
+    for err in errs.iter() {
+        eprintln!("subscribe error: {}", err);
+    }
+}
+```
+
+## cxdb-subscribe CLI
+
+```bash
+cargo run -p cxdb --bin cxdb-subscribe -- \
+  --cxdb-events-url http://127.0.0.1:9010/v1/events \
+  --follow-turns \
+  --cxdb-bin-addr 127.0.0.1:9009
+```
+
 ## Msgpack helpers
 
 - `encode_msgpack` emits deterministic map ordering (matching Go’s `SetSortMapKeys(true)`).

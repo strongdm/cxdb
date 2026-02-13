@@ -8,6 +8,8 @@ bin/
 *.dll
 *.so
 *.dylib
+!clients/rust/src/bin/
+!clients/rust/src/bin/**
 
 # Rust
 target/
