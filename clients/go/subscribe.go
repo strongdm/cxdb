@@ -173,7 +173,9 @@ func subscribeOnce(ctx context.Context, url string, options subscribeOptions, ev
 	if err != nil {
 		return fmt.Errorf("cxdb subscribe: request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))

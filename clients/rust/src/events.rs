@@ -158,7 +158,9 @@ pub fn decode_client_connected(data: &[u8]) -> Result<ClientConnectedEvent, serd
     })
 }
 
-pub fn decode_client_disconnected(data: &[u8]) -> Result<ClientDisconnectedEvent, serde_json::Error> {
+pub fn decode_client_disconnected(
+    data: &[u8],
+) -> Result<ClientDisconnectedEvent, serde_json::Error> {
     let payload: ClientDisconnectedPayload = serde_json::from_slice(data)?;
     Ok(ClientDisconnectedEvent {
         session_id: payload.session_id,

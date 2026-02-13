@@ -81,10 +81,12 @@ func main() {
 			fmt.Fprintf(os.Stderr, "dial cxdb: %v\n", err)
 			os.Exit(1)
 		}
-		defer client.Close()
+		defer func() {
+			_ = client.Close()
+		}()
 	}
 
-	var eventOut <-chan cxdb.Event = events
+	eventOut := events
 	var followEvents <-chan cxdb.Event
 
 	if follow {
@@ -211,7 +213,7 @@ func printEvent(ev cxdb.Event) {
 		fmt.Fprintf(os.Stderr, "encode event: %v\n", err)
 		return
 	}
-	fmt.Fprintln(os.Stdout, string(data))
+	_, _ = fmt.Fprintln(os.Stdout, string(data))
 }
 
 func printTurn(turn cxdb.FollowTurn) {
@@ -242,5 +244,5 @@ func printTurn(turn cxdb.FollowTurn) {
 		fmt.Fprintf(os.Stderr, "encode turn: %v\n", err)
 		return
 	}
-	fmt.Fprintln(os.Stdout, string(data))
+	_, _ = fmt.Fprintln(os.Stdout, string(data))
 }

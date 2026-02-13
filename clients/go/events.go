@@ -142,10 +142,7 @@ func DecodeClientConnected(data json.RawMessage) (ClientConnectedEvent, error) {
 	if err := json.Unmarshal(data, &payload); err != nil {
 		return ClientConnectedEvent{}, err
 	}
-	return ClientConnectedEvent{
-		SessionID: payload.SessionID,
-		ClientTag: payload.ClientTag,
-	}, nil
+	return ClientConnectedEvent(payload), nil
 }
 
 // DecodeClientDisconnected decodes a client_disconnected payload into a typed event.
@@ -154,9 +151,5 @@ func DecodeClientDisconnected(data json.RawMessage) (ClientDisconnectedEvent, er
 	if err := json.Unmarshal(data, &payload); err != nil {
 		return ClientDisconnectedEvent{}, err
 	}
-	return ClientDisconnectedEvent{
-		SessionID: payload.SessionID,
-		ClientTag: payload.ClientTag,
-		Contexts:  payload.Contexts,
-	}, nil
+	return ClientDisconnectedEvent(payload), nil
 }

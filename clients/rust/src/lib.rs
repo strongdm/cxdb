@@ -10,6 +10,8 @@ pub mod client;
 pub mod context;
 pub mod encoding;
 pub mod error;
+pub mod events;
+pub mod follow;
 pub mod fs;
 pub mod protocol;
 pub mod reconnect;
@@ -17,8 +19,6 @@ mod sse_decode;
 pub mod subscribe;
 pub mod telemetry;
 pub mod turn;
-pub mod events;
-pub mod follow;
 
 pub mod fstree;
 pub mod types;
@@ -38,8 +38,8 @@ pub use crate::events::{
     ClientDisconnectedEvent, ContextCreatedEvent, ContextMetadataUpdatedEvent, TurnAppendedEvent,
 };
 pub use crate::follow::{
-    follow_turns, with_follow_buffer, with_max_seen_per_context, FollowError, FollowOption, FollowTurn,
-    TurnClient,
+    follow_turns, with_follow_buffer, with_max_seen_per_context, FollowError, FollowOption,
+    FollowTurn, TurnClient,
 };
 pub use crate::fs::{AttachFsRequest, AttachFsResult, PutBlobRequest, PutBlobResult};
 pub use crate::reconnect::{
@@ -79,7 +79,10 @@ pub fn SubscribeEvents(
     ctx: &RequestContext,
     url: &str,
     opts: impl IntoIterator<Item = SubscribeOption>,
-) -> (crossbeam_channel::Receiver<Event>, crossbeam_channel::Receiver<SubscribeError>) {
+) -> (
+    crossbeam_channel::Receiver<Event>,
+    crossbeam_channel::Receiver<SubscribeError>,
+) {
     subscribe_events(ctx, url, opts)
 }
 
@@ -89,7 +92,10 @@ pub fn FollowTurns(
     events: crossbeam_channel::Receiver<Event>,
     client: std::sync::Arc<dyn TurnClient>,
     opts: impl IntoIterator<Item = FollowOption>,
-) -> (crossbeam_channel::Receiver<FollowTurn>, crossbeam_channel::Receiver<FollowError>) {
+) -> (
+    crossbeam_channel::Receiver<FollowTurn>,
+    crossbeam_channel::Receiver<FollowError>,
+) {
     follow_turns(ctx, events, client, opts)
 }
 

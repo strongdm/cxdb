@@ -96,7 +96,10 @@ impl<'de> Visitor<'de> for SseUint64Visitor {
     where
         E: de::Error,
     {
-        Ok(SseUint64 { value: 0, set: true })
+        Ok(SseUint64 {
+            value: 0,
+            set: true,
+        })
     }
 
     fn visit_none<E>(self) -> Result<Self::Value, E>
@@ -158,7 +161,10 @@ impl<'de> Visitor<'de> for SseUint32Visitor {
     where
         E: de::Error,
     {
-        Ok(SseUint32 { value: 0, set: true })
+        Ok(SseUint32 {
+            value: 0,
+            set: true,
+        })
     }
 
     fn visit_none<E>(self) -> Result<Self::Value, E>
@@ -216,7 +222,10 @@ impl<'de> Visitor<'de> for SseInt64Visitor {
     where
         E: de::Error,
     {
-        Ok(SseInt64 { value: 0, set: true })
+        Ok(SseInt64 {
+            value: 0,
+            set: true,
+        })
     }
 
     fn visit_none<E>(self) -> Result<Self::Value, E>

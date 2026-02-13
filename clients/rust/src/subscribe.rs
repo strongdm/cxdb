@@ -171,7 +171,10 @@ pub fn subscribe_events(
     let (err_tx, err_rx) = bounded(options.error_buffer);
 
     if url.trim().is_empty() {
-        non_blocking_send(&err_tx, SubscribeError::other("cxdb subscribe: url is required"));
+        non_blocking_send(
+            &err_tx,
+            SubscribeError::other("cxdb subscribe: url is required"),
+        );
         drop(event_tx);
         drop(err_tx);
         return (event_rx, err_rx);
@@ -310,9 +313,7 @@ where
         }
 
         let eof = !line.ends_with('\n');
-        line = line
-            .trim_end_matches(|c| c == '\r' || c == '\n')
-            .to_string();
+        line = line.trim_end_matches(['\r', '\n']).to_string();
 
         if line.is_empty() {
             flush_event(
@@ -437,19 +438,28 @@ fn next_retry_delay(current: Duration, max: Duration) -> Duration {
     next
 }
 
-fn send_event(ctx: &RequestContext, events: &Sender<Event>, event: Event) -> Result<(), SubscribeError> {
+fn send_event(
+    ctx: &RequestContext,
+    events: &Sender<Event>,
+    event: Event,
+) -> Result<(), SubscribeError> {
     let mut event = Some(event);
     loop {
         if let Some(status) = ctx_status(ctx) {
             return Err(status.into());
         }
-        match events.send_timeout(event.take().expect("event present"), Duration::from_millis(50)) {
+        match events.send_timeout(
+            event.take().expect("event present"),
+            Duration::from_millis(50),
+        ) {
             Ok(()) => return Ok(()),
             Err(SendTimeoutError::Timeout(ev)) => {
                 event = Some(ev);
             }
             Err(SendTimeoutError::Disconnected(_)) => {
-                return Err(SubscribeError::other("cxdb subscribe: event channel closed"));
+                return Err(SubscribeError::other(
+                    "cxdb subscribe: event channel closed",
+                ));
             }
         }
     }
@@ -528,7 +538,10 @@ data: {\"b\":2}\n\n";
         assert!(err.is_eof());
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].event_type, "turn_appended");
-        assert_eq!(String::from_utf8_lossy(&events[0].data), "{\"a\":1}\n{\"b\":2}");
+        assert_eq!(
+            String::from_utf8_lossy(&events[0].data),
+            "{\"a\":1}\n{\"b\":2}"
+        );
     }
 
     #[test]

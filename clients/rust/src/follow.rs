@@ -6,7 +6,9 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::{bounded, Receiver, RecvTimeoutError, SendTimeoutError, Sender, TrySendError};
+use crossbeam_channel::{
+    bounded, Receiver, RecvTimeoutError, SendTimeoutError, Sender, TrySendError,
+};
 
 use crate::client::RequestContext;
 use crate::context::ContextHead;
@@ -46,8 +48,12 @@ impl From<Error> for FollowError {
 
 pub trait TurnClient: Send + Sync {
     fn get_head(&self, ctx: &RequestContext, context_id: u64) -> Result<ContextHead, Error>;
-    fn get_last(&self, ctx: &RequestContext, context_id: u64, opts: GetLastOptions)
-        -> Result<Vec<TurnRecord>, Error>;
+    fn get_last(
+        &self,
+        ctx: &RequestContext,
+        context_id: u64,
+        opts: GetLastOptions,
+    ) -> Result<Vec<TurnRecord>, Error>;
 }
 
 impl TurnClient for crate::client::Client {
@@ -149,7 +155,9 @@ pub fn follow_turns(
             let state = states
                 .entry(turn_event.context_id)
                 .or_insert_with(|| FollowState::new(options.max_seen_per_context));
-            if let Err(err) = state.sync_context(&ctx, client.as_ref(), turn_event.context_id, &out_tx) {
+            if let Err(err) =
+                state.sync_context(&ctx, client.as_ref(), turn_event.context_id, &out_tx)
+            {
                 non_blocking_send(&err_tx, err);
             }
         }
@@ -200,11 +208,7 @@ impl FollowState {
         }
 
         let missing = if self.has_last && !self.seen.is_empty() {
-            if head.head_depth > self.last_seen_depth {
-                head.head_depth - self.last_seen_depth
-            } else {
-                0
-            }
+            head.head_depth.saturating_sub(self.last_seen_depth)
         } else {
             head.head_depth + 1
         };
@@ -226,7 +230,14 @@ impl FollowState {
             if self.seen_turn(turn.turn_id) {
                 continue;
             }
-            send_follow_turn(ctx, out, FollowTurn { context_id, turn: turn.clone() })?;
+            send_follow_turn(
+                ctx,
+                out,
+                FollowTurn {
+                    context_id,
+                    turn: turn.clone(),
+                },
+            )?;
             self.record_turn(&turn);
         }
 
@@ -253,9 +264,13 @@ impl FollowState {
     }
 }
 
-fn decode_turn_appended_event(data: &[u8]) -> Result<crate::events::TurnAppendedEvent, FollowError> {
+fn decode_turn_appended_event(
+    data: &[u8],
+) -> Result<crate::events::TurnAppendedEvent, FollowError> {
     if data.is_empty() {
-        return Err(FollowError::Decode("turn_appended: empty payload".to_string()));
+        return Err(FollowError::Decode(
+            "turn_appended: empty payload".to_string(),
+        ));
     }
     let event = decode_turn_appended(data)
         .map_err(|err| FollowError::Decode(format!("turn_appended: decode: {}", err)))?;
@@ -265,7 +280,9 @@ fn decode_turn_appended_event(data: &[u8]) -> Result<crate::events::TurnAppended
         ));
     }
     if event.turn_id == 0 {
-        return Err(FollowError::Decode("turn_appended: missing turn_id".to_string()));
+        return Err(FollowError::Decode(
+            "turn_appended: missing turn_id".to_string(),
+        ));
     }
     Ok(event)
 }
@@ -280,13 +297,18 @@ fn send_follow_turn(
         if let Some(status) = ctx_status(ctx) {
             return Err(status);
         }
-        match out.send_timeout(turn.take().expect("turn present"), Duration::from_millis(50)) {
+        match out.send_timeout(
+            turn.take().expect("turn present"),
+            Duration::from_millis(50),
+        ) {
             Ok(()) => return Ok(()),
             Err(SendTimeoutError::Timeout(item)) => {
                 turn = Some(item);
             }
             Err(SendTimeoutError::Disconnected(_)) => {
-                return Err(FollowError::Other("follow turns: output channel closed".to_string()));
+                return Err(FollowError::Other(
+                    "follow turns: output channel closed".to_string(),
+                ));
             }
         }
     }
@@ -357,10 +379,7 @@ mod tests {
     impl TurnClient for StubTurnClient {
         fn get_head(&self, _ctx: &RequestContext, context_id: u64) -> Result<ContextHead, Error> {
             let heads = self.heads.lock().unwrap();
-            heads
-                .get(&context_id)
-                .cloned()
-                .ok_or(ErrContextNotFound)
+            heads.get(&context_id).cloned().ok_or(ErrContextNotFound)
         }
 
         fn get_last(
@@ -429,7 +448,8 @@ mod tests {
 
         let (event_tx, event_rx) = bounded(10);
         let ctx = RequestContext::background();
-        let (out, errs) = follow_turns(&ctx, event_rx, client.clone(), vec![with_follow_buffer(10)]);
+        let (out, errs) =
+            follow_turns(&ctx, event_rx, client.clone(), vec![with_follow_buffer(10)]);
 
         event_tx.send(make_turn_event(context_id, 2, 1)).unwrap();
 
@@ -476,7 +496,7 @@ mod tests {
         drop(event_tx);
 
         let got: Vec<u64> = out.iter().map(|turn| turn.turn.turn_id).collect();
-        for err in errs.iter() {
+        if let Some(err) = errs.try_iter().next() {
             panic!("unexpected error: {}", err);
         }
 
@@ -517,14 +537,15 @@ mod tests {
 
         let (event_tx, event_rx) = bounded(10);
         let ctx = RequestContext::background();
-        let (out, errs) = follow_turns(&ctx, event_rx, client.clone(), vec![with_follow_buffer(10)]);
+        let (out, errs) =
+            follow_turns(&ctx, event_rx, client.clone(), vec![with_follow_buffer(10)]);
 
         event_tx.send(make_turn_event(context_id, 11, 1)).unwrap();
         event_tx.send(make_turn_event(context_id, 10, 0)).unwrap();
         drop(event_tx);
 
         let got: Vec<u64> = out.iter().map(|turn| turn.turn.turn_id).collect();
-        for err in errs.iter() {
+        if let Some(err) = errs.try_iter().next() {
             panic!("unexpected error: {}", err);
         }
 
@@ -578,14 +599,15 @@ mod tests {
 
         let (event_tx, event_rx) = bounded(10);
         let ctx = RequestContext::background();
-        let (out, errs) = follow_turns(&ctx, event_rx, client.clone(), vec![with_follow_buffer(10)]);
+        let (out, errs) =
+            follow_turns(&ctx, event_rx, client.clone(), vec![with_follow_buffer(10)]);
 
         event_tx.send(make_turn_event(2, 10, 0)).unwrap();
         event_tx.send(make_turn_event(1, 2, 1)).unwrap();
         drop(event_tx);
 
         let got: Vec<u64> = out.iter().map(|turn| turn.turn.turn_id).collect();
-        for err in errs.iter() {
+        if let Some(err) = errs.try_iter().next() {
             panic!("unexpected error: {}", err);
         }
 

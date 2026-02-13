@@ -8,8 +8,9 @@ use crossbeam_channel::TryRecvError;
 
 use cxdb::types::ConversationItem;
 use cxdb::{
-    decode_msgpack_into, dial, dial_tls, follow_turns, subscribe_events, with_client_tag, CompressionNone,
-    EncodingMsgpack, Event, FollowError, FollowTurn, RequestContext, SubscribeError, TurnClient,
+    decode_msgpack_into, dial, dial_tls, follow_turns, subscribe_events, with_client_tag,
+    CompressionNone, EncodingMsgpack, Event, FollowError, FollowTurn, RequestContext,
+    SubscribeError, TurnClient,
 };
 
 #[derive(Default)]
@@ -84,13 +85,17 @@ fn main() {
         let error_count = consume(
             &ctx,
             &cancel_handle,
-            event_out,
-            errs,
-            Some(turn_errs),
-            Some(turns),
-            config.max_events,
-            config.max_turns,
-            config.max_errors,
+            ConsumeChannels {
+                events: event_out,
+                errs,
+                turn_errs: Some(turn_errs),
+                turns: Some(turns),
+            },
+            ConsumeOptions {
+                max_events: config.max_events,
+                max_turns: config.max_turns,
+                max_errors: config.max_errors,
+            },
         );
         if config.max_errors > 0 && error_count >= config.max_errors {
             std::process::exit(1);
@@ -101,32 +106,46 @@ fn main() {
     let error_count = consume(
         &ctx,
         &cancel_handle,
-        events,
-        errs,
-        None,
-        None,
-        config.max_events,
-        config.max_turns,
-        config.max_errors,
+        ConsumeChannels {
+            events,
+            errs,
+            turn_errs: None,
+            turns: None,
+        },
+        ConsumeOptions {
+            max_events: config.max_events,
+            max_turns: config.max_turns,
+            max_errors: config.max_errors,
+        },
     );
     if config.max_errors > 0 && error_count >= config.max_errors {
         std::process::exit(1);
     }
 }
 
-fn consume(
-    ctx: &RequestContext,
-    cancel_handle: &Arc<cxdb::client::CancelHandle>,
+struct ConsumeChannels {
     events: crossbeam_channel::Receiver<Event>,
     errs: crossbeam_channel::Receiver<SubscribeError>,
-    mut turn_errs: Option<crossbeam_channel::Receiver<FollowError>>,
-    mut turns: Option<crossbeam_channel::Receiver<FollowTurn>>,
+    turn_errs: Option<crossbeam_channel::Receiver<FollowError>>,
+    turns: Option<crossbeam_channel::Receiver<FollowTurn>>,
+}
+
+struct ConsumeOptions {
     max_events: usize,
     max_turns: usize,
     max_errors: usize,
+}
+
+fn consume(
+    ctx: &RequestContext,
+    cancel_handle: &Arc<cxdb::client::CancelHandle>,
+    channels: ConsumeChannels,
+    options: ConsumeOptions,
 ) -> usize {
-    let mut events = Some(events);
-    let mut errs = Some(errs);
+    let mut events = Some(channels.events);
+    let mut errs = Some(channels.errs);
+    let mut turn_errs = channels.turn_errs;
+    let mut turns = channels.turns;
     let mut event_count = 0usize;
     let mut turn_count = 0usize;
     let mut error_count = 0usize;
@@ -207,9 +226,9 @@ fn consume(
             &mut event_count,
             &mut turn_count,
             &mut error_count,
-            max_events,
-            max_turns,
-            max_errors,
+            options.max_events,
+            options.max_turns,
+            options.max_errors,
         );
 
         if !progressed {
@@ -262,7 +281,10 @@ fn print_event(ev: &Event) {
 
 fn print_turn(turn: &FollowTurn) {
     let mut output = serde_json::Map::new();
-    output.insert("kind".to_string(), serde_json::Value::String("turn".to_string()));
+    output.insert(
+        "kind".to_string(),
+        serde_json::Value::String("turn".to_string()),
+    );
     output.insert(
         "context_id".to_string(),
         serde_json::Value::Number(turn.context_id.into()),
@@ -306,7 +328,10 @@ fn print_turn(turn: &FollowTurn) {
         output.insert("decode_error".to_string(), serde_json::Value::String(err));
     }
     if let Some(item) = item {
-        output.insert("item".to_string(), serde_json::to_value(item).unwrap_or(serde_json::Value::Null));
+        output.insert(
+            "item".to_string(),
+            serde_json::to_value(item).unwrap_or(serde_json::Value::Null),
+        );
     }
 
     let output = serde_json::Value::Object(output);
@@ -315,7 +340,10 @@ fn print_turn(turn: &FollowTurn) {
 
 fn tee_events(
     events: crossbeam_channel::Receiver<Event>,
-) -> (crossbeam_channel::Receiver<Event>, crossbeam_channel::Receiver<Event>) {
+) -> (
+    crossbeam_channel::Receiver<Event>,
+    crossbeam_channel::Receiver<Event>,
+) {
     let (out_tx, out_rx) = crossbeam_channel::bounded(128);
     let (follow_tx, follow_rx) = crossbeam_channel::bounded(128);
     std::thread::spawn(move || {
@@ -356,19 +384,19 @@ fn parse_args() -> Result<Config, String> {
                 cfg.client_tag = next_value(&mut args, &arg)?;
             }
             "--max-events" => {
-                cfg.max_events = next_value(&mut args, &arg)?.parse().map_err(|_| {
-                    format!("invalid --max-events value")
-                })?;
+                cfg.max_events = next_value(&mut args, &arg)?
+                    .parse()
+                    .map_err(|_| "invalid --max-events value".to_string())?;
             }
             "--max-turns" => {
-                cfg.max_turns = next_value(&mut args, &arg)?.parse().map_err(|_| {
-                    format!("invalid --max-turns value")
-                })?;
+                cfg.max_turns = next_value(&mut args, &arg)?
+                    .parse()
+                    .map_err(|_| "invalid --max-turns value".to_string())?;
             }
             "--max-errors" => {
-                cfg.max_errors = next_value(&mut args, &arg)?.parse().map_err(|_| {
-                    format!("invalid --max-errors value")
-                })?;
+                cfg.max_errors = next_value(&mut args, &arg)?
+                    .parse()
+                    .map_err(|_| "invalid --max-errors value".to_string())?;
             }
             _ => {
                 return Err(format!("unknown argument: {}", arg));
