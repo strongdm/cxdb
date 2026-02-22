@@ -69,10 +69,13 @@ pub struct VectorIndex {
     /// All known embeddings, keyed by turn_id.
     points: HashMap<u64, EmbeddingPoint>,
     /// Ordered list of (turn_id, point) used to build the HNSW index.
-    /// Indices here correspond to `PointId` ordinals in the built HNSW.
     ordered: Vec<(u64, EmbeddingPoint)>,
     /// The built HNSW index. `None` if dirty (inserts since last build).
     hnsw: Option<instant_distance::Hnsw<EmbeddingPoint>>,
+    /// Maps PointId (from HNSW) back to index in `ordered`.
+    /// `build_hnsw` may reorder points internally; this mapping is needed
+    /// to recover the original turn_id from a search result's PointId.
+    pid_to_idx: Vec<usize>,
 }
 
 impl VectorIndex {
@@ -82,6 +85,7 @@ impl VectorIndex {
             points: HashMap::new(),
             ordered: Vec::new(),
             hnsw: None,
+            pid_to_idx: Vec::new(),
         }
     }
 
@@ -114,8 +118,8 @@ impl VectorIndex {
         let results: Vec<(u64, f32)> = hnsw
             .search(&query_point, &mut search)
             .filter_map(|item| {
-                let idx = item.pid.into_inner();
-                let (turn_id, _) = &self.ordered[idx as usize];
+                let orig_idx = self.pid_to_idx[item.pid.into_inner() as usize];
+                let (turn_id, _) = &self.ordered[orig_idx];
                 let similarity = 1.0 - item.distance;
                 if similarity >= min_score {
                     Some((*turn_id, similarity))
@@ -162,7 +166,14 @@ impl VectorIndex {
             return;
         }
 
-        let (hnsw, _point_ids) = instant_distance::Builder::default().build_hnsw(hnsw_points);
+        let (hnsw, point_ids) = instant_distance::Builder::default().build_hnsw(hnsw_points);
+
+        // Build reverse mapping: PointId -> index in `ordered`.
+        let mut pid_to_idx = vec![0usize; point_ids.len()];
+        for (original_idx, pid) in point_ids.iter().enumerate() {
+            pid_to_idx[pid.into_inner() as usize] = original_idx;
+        }
+        self.pid_to_idx = pid_to_idx;
         self.hnsw = Some(hnsw);
     }
 }
