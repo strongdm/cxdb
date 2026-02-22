@@ -20,6 +20,7 @@ pub struct TurnRecord {
     pub codec: u32,
     pub type_tag: u64,
     pub payload_hash: [u8; 32],
+    pub embedding_hash: Option<[u8; 32]>, // BLAKE3 hash of f32[] embedding blob
     pub flags: u32,
     pub created_at_unix_ms: u64,
 }
@@ -415,6 +416,7 @@ impl TurnStore {
             codec: encoding,
             type_tag: 0,
             payload_hash,
+            embedding_hash: None,
             flags: 0,
             created_at_unix_ms: Self::now_unix_ms(),
         };
@@ -602,16 +604,28 @@ fn file_len(path: &std::path::PathBuf) -> u64 {
     std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
 }
 
+/// Flag bit indicating the record includes a 32-byte embedding hash after payload_hash.
+const FLAG_HAS_EMBEDDING: u32 = 0x1;
+
 fn encode_turn_record(record: &TurnRecord) -> Result<Vec<u8>> {
-    let mut buf = Vec::with_capacity(80);
+    let mut flags = record.flags;
+    if record.embedding_hash.is_some() {
+        flags |= FLAG_HAS_EMBEDDING;
+    }
+
+    let capacity = if record.embedding_hash.is_some() { 112 } else { 80 };
+    let mut buf = Vec::with_capacity(capacity);
     buf.write_u64::<LittleEndian>(record.turn_id)?;
     buf.write_u64::<LittleEndian>(record.parent_turn_id)?;
     buf.write_u32::<LittleEndian>(record.depth)?;
     buf.write_u32::<LittleEndian>(record.codec)?;
     buf.write_u64::<LittleEndian>(record.type_tag)?;
     buf.extend_from_slice(&record.payload_hash);
-    buf.write_u32::<LittleEndian>(record.flags)?;
+    buf.write_u32::<LittleEndian>(flags)?;
     buf.write_u64::<LittleEndian>(record.created_at_unix_ms)?;
+    if let Some(ref emb_hash) = record.embedding_hash {
+        buf.extend_from_slice(emb_hash);
+    }
     let mut hasher = Hasher::new();
     hasher.update(&buf);
     let crc = hasher.finalize();
@@ -629,9 +643,22 @@ fn read_turn_record(reader: &mut File) -> Result<TurnRecord> {
     reader.read_exact(&mut payload_hash)?;
     let flags = reader.read_u32::<LittleEndian>()?;
     let created_at_unix_ms = reader.read_u64::<LittleEndian>()?;
+
+    // If FLAG_HAS_EMBEDDING is set, the record includes 32 bytes of embedding hash
+    // between created_at_unix_ms and the CRC. Old records (flags=0) skip this.
+    let embedding_hash = if flags & FLAG_HAS_EMBEDDING != 0 {
+        let mut hash = [0u8; 32];
+        reader.read_exact(&mut hash)?;
+        Some(hash)
+    } else {
+        None
+    };
+
     let crc = reader.read_u32::<LittleEndian>()?;
 
-    let mut buf = Vec::with_capacity(80);
+    // Reconstruct the CRC-protected buffer (must match encode_turn_record layout)
+    let capacity = if embedding_hash.is_some() { 108 } else { 76 };
+    let mut buf = Vec::with_capacity(capacity);
     buf.write_u64::<LittleEndian>(turn_id)?;
     buf.write_u64::<LittleEndian>(parent_turn_id)?;
     buf.write_u32::<LittleEndian>(depth)?;
@@ -640,6 +667,9 @@ fn read_turn_record(reader: &mut File) -> Result<TurnRecord> {
     buf.extend_from_slice(&payload_hash);
     buf.write_u32::<LittleEndian>(flags)?;
     buf.write_u64::<LittleEndian>(created_at_unix_ms)?;
+    if let Some(ref emb_hash) = embedding_hash {
+        buf.extend_from_slice(emb_hash);
+    }
     let mut hasher = Hasher::new();
     hasher.update(&buf);
     let actual_crc = hasher.finalize();
@@ -655,6 +685,7 @@ fn read_turn_record(reader: &mut File) -> Result<TurnRecord> {
         codec,
         type_tag,
         payload_hash,
+        embedding_hash,
         flags,
         created_at_unix_ms,
     })

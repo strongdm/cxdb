@@ -17,3 +17,4 @@ pub mod registry;
 pub mod s3_sync;
 pub mod store;
 pub mod turn_store;
+pub mod vector;
