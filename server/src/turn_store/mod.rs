@@ -383,6 +383,7 @@ impl TurnStore {
         declared_type_version: u32,
         compression: u32,
         uncompressed_len: u32,
+        embedding_hash: Option<[u8; 32]>,
     ) -> Result<TurnRecord> {
         let (parent_id, depth) = if parent_turn_id != 0 {
             let parent = self
@@ -409,6 +410,11 @@ impl TurnStore {
         let turn_id = self.next_turn_id;
         self.next_turn_id += 1;
 
+        let flags = if embedding_hash.is_some() {
+            FLAG_HAS_EMBEDDING
+        } else {
+            0
+        };
         let record = TurnRecord {
             turn_id,
             parent_turn_id: parent_id,
@@ -416,8 +422,8 @@ impl TurnStore {
             codec: encoding,
             type_tag: 0,
             payload_hash,
-            embedding_hash: None,
-            flags: 0,
+            embedding_hash,
+            flags,
             created_at_unix_ms: Self::now_unix_ms(),
         };
 

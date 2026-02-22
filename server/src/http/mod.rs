@@ -845,9 +845,22 @@ fn handle_request(
                         StoreError::InvalidInput("missing required field: data or payload".into())
                     })?;
 
+                // If usage metadata is provided, inject it into the payload data
+                // as msgpack key 20 before encoding.
+                let payload_json_with_usage = if let Some(usage_val) = body.get("usage") {
+                    let mut data = payload_json.clone();
+                    if let Some(obj) = data.as_object_mut() {
+                        let usage_map = encode_usage_to_json(usage_val)?;
+                        obj.insert("20".to_string(), usage_map);
+                    }
+                    data
+                } else {
+                    payload_json.clone()
+                };
+
                 let payload_bytes = {
                     let registry = registry.lock().unwrap();
-                    encode_http_payload(payload_json, &type_id, type_version, &registry)?
+                    encode_http_payload(&payload_json_with_usage, &type_id, type_version, &registry)?
                 };
 
                 // Parse optional embedding for vector index
@@ -856,9 +869,24 @@ fn handle_request(
                     .map(|v| parse_f32_array(v))
                     .transpose()?;
 
+                // If embedding provided, serialize to bytes, BLAKE3 hash, and prepare
+                // for blob_store persistence + TurnRecord embedding_hash.
+                let (embedding_hash, embedding_blob) = match &embedding {
+                    Some(emb) => {
+                        let blob = embedding_to_bytes(emb);
+                        let hash = blake3::hash(&blob);
+                        (Some(*hash.as_bytes()), Some(blob))
+                    }
+                    None => (None, None),
+                };
+
                 let hash = blake3::hash(&payload_bytes);
                 let (record, metadata) = {
                     let mut store = store.write().unwrap();
+                    // Store embedding blob in blob_store if present
+                    if let (Some(emb_hash), Some(ref emb_blob)) = (embedding_hash, &embedding_blob) {
+                        store.blob_store.put_if_absent(emb_hash, emb_blob)?;
+                    }
                     store.append_turn(
                         context_id,
                         parent_turn_id,
@@ -869,6 +897,7 @@ fn handle_request(
                         payload_bytes.len() as u32,
                         *hash.as_bytes(),
                         &payload_bytes,
+                        embedding_hash,
                     )?
                 };
 
@@ -908,12 +937,15 @@ fn handle_request(
                     }
                 }
 
-                let resp = json!({
+                let mut resp = json!({
                     "context_id": context_id.to_string(),
                     "turn_id": record.turn_id.to_string(),
                     "depth": record.depth,
                     "content_hash": hex::encode(hash.as_bytes()),
                 });
+                if let Some(emb_hash) = record.embedding_hash {
+                    resp["embedding_hash"] = JsonValue::String(hex::encode(emb_hash));
+                }
                 let bytes = serde_json::to_vec(&resp)
                     .map_err(|e| StoreError::InvalidInput(format!("json encode error: {e}")))?;
                 Ok((
@@ -1672,6 +1704,62 @@ fn parse_f32_array(value: &JsonValue) -> Result<Vec<f32>> {
         out.push(f as f32);
     }
     Ok(out)
+}
+
+/// Encode a usage JSON object into the numeric-keyed format expected by the payload.
+///
+/// Input: `{"model": "kimi-k2p5", "provider": "fireworks", "input_tokens": 1500, ...}`
+/// Output: `{"1": 1500, "2": 800, "3": "kimi-k2p5", "4": "fireworks", "5": 0, "6": 0, "7": 2400, "8": "end_turn", "9": "openclaw-gateway"}`
+///
+/// Mapping:
+///   1 = input_tokens, 2 = output_tokens, 3 = model, 4 = provider,
+///   5 = cache_read_tokens, 6 = cache_write_tokens, 7 = latency_ms,
+///   8 = stop_reason, 9 = source
+fn encode_usage_to_json(usage: &JsonValue) -> Result<JsonValue> {
+    let obj = usage
+        .as_object()
+        .ok_or_else(|| StoreError::InvalidInput("usage must be an object".into()))?;
+
+    let mut out = serde_json::Map::new();
+
+    if let Some(v) = obj.get("input_tokens") {
+        out.insert("1".to_string(), v.clone());
+    }
+    if let Some(v) = obj.get("output_tokens") {
+        out.insert("2".to_string(), v.clone());
+    }
+    if let Some(v) = obj.get("model") {
+        out.insert("3".to_string(), v.clone());
+    }
+    if let Some(v) = obj.get("provider") {
+        out.insert("4".to_string(), v.clone());
+    }
+    if let Some(v) = obj.get("cache_read_tokens") {
+        out.insert("5".to_string(), v.clone());
+    }
+    if let Some(v) = obj.get("cache_write_tokens") {
+        out.insert("6".to_string(), v.clone());
+    }
+    if let Some(v) = obj.get("latency_ms") {
+        out.insert("7".to_string(), v.clone());
+    }
+    if let Some(v) = obj.get("stop_reason") {
+        out.insert("8".to_string(), v.clone());
+    }
+    if let Some(v) = obj.get("source") {
+        out.insert("9".to_string(), v.clone());
+    }
+
+    Ok(JsonValue::Object(out))
+}
+
+/// Serialize an f32 embedding vector to little-endian bytes for blob storage.
+fn embedding_to_bytes(embedding: &[f32]) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(embedding.len() * 4);
+    for &v in embedding {
+        buf.extend_from_slice(&v.to_le_bytes());
+    }
+    buf
 }
 
 fn extract_http_client_tag(request: &tiny_http::Request) -> String {

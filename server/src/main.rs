@@ -339,6 +339,7 @@ fn handle_client(
                     req.uncompressed_len,
                     req.content_hash,
                     &req.payload_bytes,
+                    None, // embedding_hash: binary protocol does not support embedding yet
                 )?;
                 // If fs_root_hash was provided, attach it to this turn
                 if let Some(fs_root_hash) = req.fs_root_hash {

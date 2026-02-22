@@ -58,6 +58,7 @@ fn append_turn(store: &mut Store, context_id: u64, payload: &[u8]) -> u64 {
             payload.len() as u32,
             *hash.as_bytes(),
             payload,
+            None,
         )
         .expect("append turn");
 
@@ -303,4 +304,184 @@ fn semantic_search_nonexistent_context() {
 
     let result = store.semantic_search(999, &[1.0, 0.0, 0.0], 10, 0.0);
     assert!(result.is_err(), "should error for nonexistent context");
+}
+
+/// Helper: serialize an f32 embedding vector to little-endian bytes.
+fn embedding_to_bytes(embedding: &[f32]) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(embedding.len() * 4);
+    for &v in embedding {
+        buf.extend_from_slice(&v.to_le_bytes());
+    }
+    buf
+}
+
+/// Helper: append a turn with an embedding hash set on the TurnRecord and
+/// the embedding blob stored in blob_store, then insert into vector index.
+fn append_turn_with_embedding(
+    store: &mut Store,
+    context_id: u64,
+    payload: &[u8],
+    embedding: Vec<f32>,
+) -> u64 {
+    // Serialize embedding to bytes and compute BLAKE3 hash
+    let emb_blob = embedding_to_bytes(&embedding);
+    let emb_hash = blake3::hash(&emb_blob);
+
+    // Store embedding blob in blob_store
+    store
+        .blob_store
+        .put_if_absent(*emb_hash.as_bytes(), &emb_blob)
+        .expect("store embedding blob");
+
+    // Compute payload hash
+    let mut hasher = Hasher::new();
+    hasher.update(payload);
+    let hash = hasher.finalize();
+
+    // Append turn with embedding_hash
+    let (record, _meta) = store
+        .append_turn(
+            context_id,
+            0,
+            "com.example.Message".to_string(),
+            1,
+            1, // msgpack
+            0, // uncompressed
+            payload.len() as u32,
+            *hash.as_bytes(),
+            payload,
+            Some(*emb_hash.as_bytes()),
+        )
+        .expect("append turn with embedding");
+
+    // Also insert embedding into vector index for search
+    store.insert_embedding(record.turn_id, embedding);
+
+    record.turn_id
+}
+
+#[test]
+fn append_with_embedding_and_search_roundtrip() {
+    let dir = tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open store");
+
+    let ctx = store.create_context(0).expect("create context");
+
+    // Append 2 turns: one with embedding, one without
+    let p1 = encode_payload_with_usage("hello from model", 1500, 800, "kimi-k2p5", "fireworks");
+    let p2 = encode_payload("unrelated turn");
+
+    let emb1 = vec![0.8, 0.6, 0.0];
+    let t1 = append_turn_with_embedding(&mut store, ctx.context_id, &p1, emb1.clone());
+    let t2 = append_turn(&mut store, ctx.context_id, &p2);
+
+    // Also give t2 an embedding that's far from our query
+    store.insert_embedding(t2, vec![0.0, 0.0, 1.0]);
+
+    // 1. Verify embedding_hash is set on TurnRecord for t1
+    let record1 = store.turn_store.get_turn(t1).expect("get turn t1");
+    assert!(
+        record1.embedding_hash.is_some(),
+        "TurnRecord for t1 should have embedding_hash set"
+    );
+
+    // Verify the embedding blob is in blob_store
+    let emb_hash = record1.embedding_hash.unwrap();
+    assert!(
+        store.blob_store.contains(&emb_hash),
+        "embedding blob should exist in blob_store"
+    );
+
+    // Verify we can reconstruct the embedding from blob_store
+    let stored_blob = store.blob_store.get(&emb_hash).expect("get embedding blob");
+    let reconstructed: Vec<f32> = stored_blob
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect();
+    assert_eq!(
+        reconstructed, emb1,
+        "reconstructed embedding should match original"
+    );
+
+    // 2. Verify t2 has no embedding_hash
+    let record2 = store.turn_store.get_turn(t2).expect("get turn t2");
+    assert!(
+        record2.embedding_hash.is_none(),
+        "TurnRecord for t2 should not have embedding_hash"
+    );
+
+    // 3. Search for embedding similar to t1 ([0.8, 0.6, 0.0])
+    let results = store
+        .semantic_search(ctx.context_id, &[1.0, 0.5, 0.0], 3, 0.0)
+        .expect("semantic search");
+
+    assert!(!results.is_empty(), "search should return results");
+    assert_eq!(
+        results[0].0, t1,
+        "first search result should be t1 (closest to query)"
+    );
+
+    // 4. Verify usage aggregation includes the usage from t1
+    let usage = store
+        .aggregate_usage(ctx.context_id)
+        .expect("aggregate usage");
+
+    assert_eq!(usage.total_input_tokens, 1500);
+    assert_eq!(usage.total_output_tokens, 800);
+    assert_eq!(usage.turn_count, 2);
+
+    let fireworks = usage
+        .by_provider
+        .get("fireworks")
+        .expect("should have fireworks provider");
+    assert_eq!(fireworks.input_tokens, 1500);
+    assert_eq!(fireworks.output_tokens, 800);
+
+    let kimi = usage
+        .by_model
+        .get("kimi-k2p5")
+        .expect("should have kimi-k2p5 model");
+    assert_eq!(kimi.input_tokens, 1500);
+    assert_eq!(kimi.output_tokens, 800);
+}
+
+#[test]
+fn embedding_hash_persists_across_reopen() {
+    let dir = tempdir().expect("tempdir");
+
+    let (context_id, turn_id, expected_emb_hash) = {
+        let mut store = Store::open(dir.path()).expect("open store");
+        let ctx = store.create_context(0).expect("create context");
+
+        let p = encode_payload("persistent embedding");
+        let emb = vec![0.5, 0.5, 0.0];
+        let tid = append_turn_with_embedding(&mut store, ctx.context_id, &p, emb);
+
+        let record = store.turn_store.get_turn(tid).expect("get turn");
+        let emb_hash = record.embedding_hash.expect("should have embedding_hash");
+
+        (ctx.context_id, tid, emb_hash)
+    }; // store dropped
+
+    // Reopen and verify embedding_hash is still there
+    let store = Store::open(dir.path()).expect("reopen store");
+    let record = store.turn_store.get_turn(turn_id).expect("get turn after reopen");
+    assert_eq!(
+        record.embedding_hash,
+        Some(expected_emb_hash),
+        "embedding_hash should persist across store reopen"
+    );
+
+    // Verify the embedding blob is still in blob_store
+    assert!(
+        store.blob_store.contains(&expected_emb_hash),
+        "embedding blob should persist across store reopen"
+    );
+
+    // Verify we can still read the last turns
+    let last = store
+        .get_last(context_id, 10, true)
+        .expect("get last after reopen");
+    assert_eq!(last.len(), 1);
+    assert_eq!(last[0].record.turn_id, turn_id);
 }

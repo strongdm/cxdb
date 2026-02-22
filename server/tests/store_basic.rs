@@ -30,6 +30,7 @@ fn append_and_fork() {
             payload.len() as u32,
             *hash.as_bytes(),
             &payload,
+            None,
         )
         .expect("append first");
 
@@ -51,6 +52,7 @@ fn append_and_fork() {
             second_payload.len() as u32,
             *hash2.as_bytes(),
             &second_payload,
+            None,
         )
         .expect("append second");
 
@@ -84,6 +86,7 @@ fn data_persists_across_reopen() {
                 payload.len() as u32,
                 *hash.as_bytes(),
                 &payload,
+                None,
             )
             .expect("append turn");
         (ctx.context_id, turn.turn_id)
@@ -130,6 +133,7 @@ fn indexes_parent_child_context_lineage() {
             child_payload.len() as u32,
             *child_hash.as_bytes(),
             &child_payload,
+            None,
         )
         .expect("append child first turn");
 
@@ -147,6 +151,7 @@ fn indexes_parent_child_context_lineage() {
             grandchild_payload.len() as u32,
             *grandchild_hash.as_bytes(),
             &grandchild_payload,
+            None,
         )
         .expect("append grandchild first turn");
 

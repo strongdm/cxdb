@@ -210,6 +210,8 @@ impl Store {
     /// Append a turn to a context.
     ///
     /// Returns the turn record and, if this is the first turn (depth=0), the extracted metadata.
+    /// If `embedding_hash` is provided, it is stored on the TurnRecord for content-addressed
+    /// embedding blob lookup.
     #[allow(clippy::too_many_arguments)]
     pub fn append_turn(
         &mut self,
@@ -222,6 +224,7 @@ impl Store {
         uncompressed_len: u32,
         content_hash: [u8; 32],
         payload_bytes: &[u8],
+        embedding_hash: Option<[u8; 32]>,
     ) -> Result<(TurnRecord, Option<ContextMetadata>)> {
         let raw_bytes = match compression {
             0 => payload_bytes.to_vec(),
@@ -258,6 +261,7 @@ impl Store {
             declared_type_version,
             compression,
             uncompressed_len,
+            embedding_hash,
         )?;
 
         // Cache metadata if this is the first turn, and return it for event publishing
