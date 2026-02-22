@@ -13,6 +13,7 @@ use crate::cql::{self, CqlError, CqlQuery, IndexStats, SecondaryIndexes};
 use crate::error::{Result, StoreError};
 use crate::fs_store::{FsRootsIndex, TreeEntry};
 use crate::turn_store::{ContextHead, TurnMeta, TurnRecord, TurnStore};
+use crate::vector::VectorIndex;
 
 #[derive(Debug, Clone)]
 pub struct TurnWithMeta {
@@ -97,6 +98,12 @@ pub struct Store {
     pub context_metadata_cache: Mutex<HashMap<u64, Option<ContextMetadata>>>,
     /// Secondary indexes for CQL queries.
     secondary_indexes: SecondaryIndexes,
+    /// In-memory HNSW vector index for semantic search over turn embeddings.
+    /// Uses interior mutability because `search()` needs `&mut self` (lazy index rebuild).
+    pub vector_index: Mutex<VectorIndex>,
+    /// Mapping from context_id to the set of turn_ids belonging to that context.
+    /// Used by semantic search to scope queries to a single context.
+    pub context_turn_ids: Mutex<HashMap<u64, Vec<u64>>>,
 }
 
 impl Store {
@@ -107,6 +114,8 @@ impl Store {
             fs_roots: FsRootsIndex::open(&dir.join("fs"))?,
             context_metadata_cache: Mutex::new(HashMap::new()),
             secondary_indexes: SecondaryIndexes::new(),
+            vector_index: Mutex::new(VectorIndex::new()),
+            context_turn_ids: Mutex::new(HashMap::new()),
         };
 
         // Pre-populate metadata cache and build secondary indexes
@@ -120,9 +129,18 @@ impl Store {
         // Get all context heads
         let heads = self.turn_store.list_recent_contexts(u32::MAX);
 
-        // Pre-populate metadata cache for all contexts
+        // Pre-populate metadata cache for all contexts and build context_turn_ids
         for head in &heads {
             let _ = self.get_context_metadata(head.context_id);
+
+            // Populate context -> turn_id mapping by walking the turn chain
+            if let Ok(turns) = self.turn_store.get_last(head.context_id, u32::MAX) {
+                let turn_ids: Vec<u64> = turns.iter().map(|t| t.turn_id).collect();
+                if !turn_ids.is_empty() {
+                    let mut ctx_turns = self.context_turn_ids.lock().unwrap();
+                    ctx_turns.insert(head.context_id, turn_ids);
+                }
+            }
         }
 
         // Build secondary indexes from the cache
@@ -256,6 +274,15 @@ impl Store {
             );
         }
 
+        // Track context -> turn_id mapping for vector search scoping
+        {
+            let mut ctx_turns = self.context_turn_ids.lock().unwrap();
+            ctx_turns
+                .entry(context_id)
+                .or_default()
+                .push(record.turn_id);
+        }
+
         Ok((record, metadata))
     }
 
@@ -361,6 +388,153 @@ impl Store {
 
         out.sort_unstable_by(|a, b| b.cmp(a));
         out
+    }
+
+    // =========================================================================
+    // Vector / Semantic Search Methods
+    // =========================================================================
+
+    /// Insert an embedding for a turn into the vector index.
+    pub fn insert_embedding(&self, turn_id: u64, embedding: Vec<f32>) {
+        let mut index = self.vector_index.lock().unwrap();
+        index.insert(turn_id, embedding);
+    }
+
+    /// Semantic search within a context: find turns closest to the query embedding.
+    ///
+    /// Returns `(turn_id, similarity_score)` pairs sorted by descending similarity.
+    pub fn semantic_search(
+        &self,
+        context_id: u64,
+        query_embedding: &[f32],
+        limit: usize,
+        min_score: f32,
+    ) -> Result<Vec<(u64, f32)>> {
+        // Verify context exists
+        let _ = self.turn_store.get_head(context_id)?;
+
+        // Get turn IDs for this context
+        let ctx_turns = self.context_turn_ids.lock().unwrap();
+        let turn_ids = match ctx_turns.get(&context_id) {
+            Some(ids) => ids.clone(),
+            None => return Ok(Vec::new()),
+        };
+        drop(ctx_turns);
+
+        // Search the global index and filter to this context's turns
+        let turn_id_set: HashSet<u64> = turn_ids.into_iter().collect();
+        let mut index = self.vector_index.lock().unwrap();
+        let all_results = index.search(query_embedding, limit * 4, min_score);
+
+        let mut filtered: Vec<(u64, f32)> = all_results
+            .into_iter()
+            .filter(|(tid, _)| turn_id_set.contains(tid))
+            .take(limit)
+            .collect();
+
+        filtered.sort_by(|a, b| ordered_float::OrderedFloat(b.1).cmp(&ordered_float::OrderedFloat(a.1)));
+        Ok(filtered)
+    }
+
+    /// Token-budget context window: select turns closest to a query embedding that
+    /// fit within a token budget, optionally always including the most recent N turns.
+    ///
+    /// Returns turns ordered chronologically (by depth).
+    pub fn token_budget_window(
+        &self,
+        context_id: u64,
+        query_embedding: &[f32],
+        token_budget: u32,
+        always_include_recent: u32,
+    ) -> Result<Vec<TurnWithMeta>> {
+        // Verify context exists
+        let _ = self.turn_store.get_head(context_id)?;
+
+        // Get the recent turns first (always included)
+        let recent_turns = self.get_last(context_id, always_include_recent, true)?;
+        let recent_turn_ids: HashSet<u64> = recent_turns.iter().map(|t| t.record.turn_id).collect();
+
+        // Estimate tokens consumed by recent turns
+        let mut budget_used: u32 = recent_turns
+            .iter()
+            .map(|t| estimate_tokens(t.payload.as_deref()))
+            .sum();
+
+        // Get semantic search results (excluding recent turns, since those are always included)
+        let search_results = self.semantic_search(context_id, query_embedding, 100, 0.0)?;
+
+        // Pack additional turns by relevance until budget is exhausted
+        let mut additional_turns: Vec<TurnWithMeta> = Vec::new();
+        for (turn_id, _score) in &search_results {
+            if recent_turn_ids.contains(turn_id) {
+                continue;
+            }
+            if budget_used >= token_budget {
+                break;
+            }
+
+            let record = match self.turn_store.get_turn(*turn_id) {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            let meta = match self.turn_store.get_turn_meta(*turn_id) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            let payload = self.blob_store.get(&record.payload_hash).ok();
+            let tokens = estimate_tokens(payload.as_deref());
+
+            if budget_used + tokens > token_budget {
+                continue; // skip this turn, try smaller ones
+            }
+            budget_used += tokens;
+            additional_turns.push(TurnWithMeta {
+                record,
+                meta,
+                payload,
+            });
+        }
+
+        // Combine and sort by depth (chronological order)
+        let mut result = recent_turns;
+        result.extend(additional_turns);
+        result.sort_by_key(|t| t.record.depth);
+        result.dedup_by_key(|t| t.record.turn_id);
+
+        Ok(result)
+    }
+
+    /// Aggregate usage metadata across all turns in a context.
+    ///
+    /// Scans turn payloads for token usage fields and aggregates them.
+    pub fn aggregate_usage(&self, context_id: u64) -> Result<UsageAggregation> {
+        let _ = self.turn_store.get_head(context_id)?;
+
+        let turns = self.get_last(context_id, u32::MAX, true)?;
+        let mut agg = UsageAggregation::default();
+
+        for turn in &turns {
+            if let Some(ref payload) = turn.payload {
+                if let Some(usage) = extract_usage_from_payload(payload) {
+                    agg.total_input_tokens += usage.input_tokens;
+                    agg.total_output_tokens += usage.output_tokens;
+
+                    if let Some(ref model) = usage.model {
+                        let entry = agg.by_model.entry(model.clone()).or_default();
+                        entry.input_tokens += usage.input_tokens;
+                        entry.output_tokens += usage.output_tokens;
+                    }
+                    if let Some(ref provider) = usage.provider {
+                        let entry = agg.by_provider.entry(provider.clone()).or_default();
+                        entry.input_tokens += usage.input_tokens;
+                        entry.output_tokens += usage.output_tokens;
+                    }
+                }
+            }
+        }
+
+        agg.turn_count = turns.len() as u64;
+        Ok(agg)
     }
 
     // =========================================================================
@@ -590,6 +764,102 @@ pub struct StoreStats {
     pub fs_roots_total: usize,
     pub fs_roots_bytes: u64,
     pub fs_content_bytes: u64,
+}
+
+// =========================================================================
+// Usage Aggregation Types
+// =========================================================================
+
+/// Token usage counters for a single model or provider.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct TokenCounts {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+}
+
+/// Aggregated usage across all turns in a context.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct UsageAggregation {
+    pub total_input_tokens: u64,
+    pub total_output_tokens: u64,
+    pub turn_count: u64,
+    pub by_model: HashMap<String, TokenCounts>,
+    pub by_provider: HashMap<String, TokenCounts>,
+}
+
+/// Usage extracted from a single turn's payload.
+struct TurnUsage {
+    input_tokens: u64,
+    output_tokens: u64,
+    model: Option<String>,
+    provider: Option<String>,
+}
+
+/// Extract usage metadata from a msgpack-encoded payload.
+///
+/// Looks for well-known keys in the payload map:
+/// - key 20: usage sub-map with token counts
+///   - key 1: input_tokens (u64)
+///   - key 2: output_tokens (u64)
+///   - key 3: model (string)
+///   - key 4: provider (string)
+fn extract_usage_from_payload(payload: &[u8]) -> Option<TurnUsage> {
+    let mut cursor = std::io::Cursor::new(payload);
+    let value = rmpv::decode::read_value(&mut cursor).ok()?;
+
+    let map = match &value {
+        Value::Map(m) => m,
+        _ => return None,
+    };
+
+    // Look for key 20 (usage)
+    let usage_value = map.iter().find_map(|(k, v)| {
+        if key_to_tag(k)? == 20 {
+            Some(v)
+        } else {
+            None
+        }
+    })?;
+
+    let usage_map = match usage_value {
+        Value::Map(m) => m,
+        _ => return None,
+    };
+
+    let mut usage = TurnUsage {
+        input_tokens: 0,
+        output_tokens: 0,
+        model: None,
+        provider: None,
+    };
+
+    for (k, v) in usage_map.iter() {
+        let key = match key_to_tag(k) {
+            Some(t) => t,
+            None => continue,
+        };
+        match key {
+            1 => usage.input_tokens = extract_u64(v).unwrap_or(0),
+            2 => usage.output_tokens = extract_u64(v).unwrap_or(0),
+            3 => usage.model = extract_string(v),
+            4 => usage.provider = extract_string(v),
+            _ => {}
+        }
+    }
+
+    if usage.input_tokens > 0 || usage.output_tokens > 0 {
+        Some(usage)
+    } else {
+        None
+    }
+}
+
+/// Rough token estimate: ~4 bytes per token (conservative for English text).
+fn estimate_tokens(payload: Option<&[u8]>) -> u32 {
+    match payload {
+        Some(data) => (data.len() as u32) / 4,
+        None => 0,
+    }
 }
 
 /// Extract context metadata from a msgpack-encoded ConversationItem payload.

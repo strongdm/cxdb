@@ -650,6 +650,184 @@ fn handle_request(
                         ),
                 ))
             }
+            // Semantic search within a context
+            (Method::Post, ["v1", "contexts", context_id, "search"]) => {
+                let context_id: u64 = context_id
+                    .parse()
+                    .map_err(|_| StoreError::InvalidInput("invalid context_id".into()))?;
+
+                let body = parse_json_body(&mut request)?;
+                let query_embedding = parse_f32_array(
+                    body.get("query_embedding")
+                        .ok_or_else(|| StoreError::InvalidInput("missing required field: query_embedding".into()))?,
+                )?;
+                let limit = body
+                    .get("limit")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(10) as usize;
+                let min_score = body
+                    .get("min_score")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0) as f32;
+
+                let store = store.read().unwrap();
+                let results = store.semantic_search(context_id, &query_embedding, limit, min_score)?;
+
+                let results_json: Vec<JsonValue> = results
+                    .iter()
+                    .map(|(turn_id, score)| {
+                        let snippet = store
+                            .turn_store
+                            .get_turn_meta(*turn_id)
+                            .map(|m| m.declared_type_id.clone())
+                            .unwrap_or_default();
+                        json!({
+                            "turn_id": turn_id.to_string(),
+                            "score": *score,
+                            "snippet": snippet,
+                        })
+                    })
+                    .collect();
+
+                let resp = json!({
+                    "context_id": context_id.to_string(),
+                    "results": results_json,
+                    "count": results_json.len(),
+                });
+
+                let bytes = serde_json::to_vec(&resp)
+                    .map_err(|e| StoreError::InvalidInput(format!("json encode error: {e}")))?;
+                Ok((
+                    200,
+                    Response::from_data(bytes)
+                        .with_status_code(StatusCode(200))
+                        .with_header(
+                            Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+                                .unwrap(),
+                        ),
+                ))
+            }
+            // Token-budget context window
+            (Method::Post, ["v1", "contexts", context_id, "window"]) => {
+                let context_id: u64 = context_id
+                    .parse()
+                    .map_err(|_| StoreError::InvalidInput("invalid context_id".into()))?;
+
+                let body = parse_json_body(&mut request)?;
+                let query_embedding = parse_f32_array(
+                    body.get("query_embedding")
+                        .ok_or_else(|| StoreError::InvalidInput("missing required field: query_embedding".into()))?,
+                )?;
+                let token_budget = body
+                    .get("token_budget")
+                    .and_then(|v| v.as_u64())
+                    .ok_or_else(|| StoreError::InvalidInput("missing required field: token_budget".into()))?
+                    as u32;
+                let always_include_recent = body
+                    .get("always_include_recent")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(3) as u32;
+
+                let store = store.read().unwrap();
+                let turns = store.token_budget_window(
+                    context_id,
+                    &query_embedding,
+                    token_budget,
+                    always_include_recent,
+                )?;
+
+                let turns_json: Vec<JsonValue> = turns
+                    .iter()
+                    .map(|t| {
+                        json!({
+                            "turn_id": t.record.turn_id.to_string(),
+                            "parent_turn_id": t.record.parent_turn_id.to_string(),
+                            "depth": t.record.depth,
+                            "declared_type": {
+                                "type_id": t.meta.declared_type_id,
+                                "type_version": t.meta.declared_type_version,
+                            },
+                        })
+                    })
+                    .collect();
+
+                let resp = json!({
+                    "context_id": context_id.to_string(),
+                    "turns": turns_json,
+                    "count": turns_json.len(),
+                    "token_budget": token_budget,
+                });
+
+                let bytes = serde_json::to_vec(&resp)
+                    .map_err(|e| StoreError::InvalidInput(format!("json encode error: {e}")))?;
+                Ok((
+                    200,
+                    Response::from_data(bytes)
+                        .with_status_code(StatusCode(200))
+                        .with_header(
+                            Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+                                .unwrap(),
+                        ),
+                ))
+            }
+            // Usage aggregation for a context
+            (Method::Get, ["v1", "contexts", context_id, "usage"]) => {
+                let context_id: u64 = context_id
+                    .parse()
+                    .map_err(|_| StoreError::InvalidInput("invalid context_id".into()))?;
+
+                let store = store.read().unwrap();
+                let usage = store.aggregate_usage(context_id)?;
+
+                let by_model: serde_json::Map<String, JsonValue> = usage
+                    .by_model
+                    .iter()
+                    .map(|(model, counts)| {
+                        (
+                            model.clone(),
+                            json!({
+                                "input_tokens": counts.input_tokens,
+                                "output_tokens": counts.output_tokens,
+                            }),
+                        )
+                    })
+                    .collect();
+
+                let by_provider: serde_json::Map<String, JsonValue> = usage
+                    .by_provider
+                    .iter()
+                    .map(|(provider, counts)| {
+                        (
+                            provider.clone(),
+                            json!({
+                                "input_tokens": counts.input_tokens,
+                                "output_tokens": counts.output_tokens,
+                            }),
+                        )
+                    })
+                    .collect();
+
+                let resp = json!({
+                    "context_id": context_id.to_string(),
+                    "total_input_tokens": usage.total_input_tokens,
+                    "total_output_tokens": usage.total_output_tokens,
+                    "turn_count": usage.turn_count,
+                    "by_model": JsonValue::Object(by_model),
+                    "by_provider": JsonValue::Object(by_provider),
+                });
+
+                let bytes = serde_json::to_vec(&resp)
+                    .map_err(|e| StoreError::InvalidInput(format!("json encode error: {e}")))?;
+                Ok((
+                    200,
+                    Response::from_data(bytes)
+                        .with_status_code(StatusCode(200))
+                        .with_header(
+                            Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+                                .unwrap(),
+                        ),
+                ))
+            }
             (Method::Post, ["v1", "contexts", context_id, "append"])
             | (Method::Post, ["v1", "contexts", context_id, "turns"]) => {
                 let context_id: u64 = context_id
@@ -672,6 +850,12 @@ fn handle_request(
                     encode_http_payload(payload_json, &type_id, type_version, &registry)?
                 };
 
+                // Parse optional embedding for vector index
+                let embedding = body
+                    .get("embedding")
+                    .map(|v| parse_f32_array(v))
+                    .transpose()?;
+
                 let hash = blake3::hash(&payload_bytes);
                 let (record, metadata) = {
                     let mut store = store.write().unwrap();
@@ -687,6 +871,12 @@ fn handle_request(
                         &payload_bytes,
                     )?
                 };
+
+                // If an embedding was provided, insert it into the vector index
+                if let Some(emb) = embedding {
+                    let store = store.read().unwrap();
+                    store.insert_embedding(record.turn_id, emb);
+                }
 
                 event_bus.publish(StoreEvent::TurnAppended {
                     context_id: context_id.to_string(),
@@ -1463,6 +1653,25 @@ fn get_optional_u64(body: &JsonValue, key: &str) -> Result<Option<u64>> {
         Some(value) => parse_json_u64(value, key).map(Some),
         None => Ok(None),
     }
+}
+
+/// Parse a JSON array of numbers into a Vec<f32>.
+fn parse_f32_array(value: &JsonValue) -> Result<Vec<f32>> {
+    let arr = value
+        .as_array()
+        .ok_or_else(|| StoreError::InvalidInput("expected array of floats".into()))?;
+    let mut out = Vec::with_capacity(arr.len());
+    for (i, item) in arr.iter().enumerate() {
+        let f = item
+            .as_f64()
+            .or_else(|| item.as_i64().map(|v| v as f64))
+            .or_else(|| item.as_u64().map(|v| v as f64))
+            .ok_or_else(|| {
+                StoreError::InvalidInput(format!("expected number at index {i} in embedding array"))
+            })?;
+        out.push(f as f32);
+    }
+    Ok(out)
 }
 
 fn extract_http_client_tag(request: &tiny_http::Request) -> String {
