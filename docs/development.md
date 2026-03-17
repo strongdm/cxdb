@@ -44,6 +44,9 @@ cxdb/
 │   │   └── cmd/          # Example programs
 │   └── rust/             # Rust client SDK
 │       └── cxdb/
+├── cxtx/                 # Rust CLI wrapper for codex/claude session capture
+│   ├── src/
+│   └── tests/
 ├── gateway/              # Go OAuth proxy + static serving
 │   ├── cmd/server/
 │   ├── internal/
@@ -76,8 +79,26 @@ cargo run
 ```
 
 Binaries are output to:
-- Debug: `target/debug/ai-cxdb-store`
-- Release: `target/release/ai-cxdb-store`
+- Debug: `target/debug/cxdb-server`
+- Release: `target/release/cxdb-server`
+
+### `cxtx` Wrapper
+
+```bash
+# Build only the wrapper
+cargo build -p cxtx
+
+# Show CLI contract
+cargo run -p cxtx -- --help
+
+# Run package tests
+cargo test -p cxtx
+
+# Run the end-to-end integration suite
+cargo test -p cxtx --test integration
+```
+
+`cxtx` is a Rust workspace member. It wraps `codex` or `claude`, publishes the canonical `cxdb.ConversationItem` registry bundle through the HTTP API, appends extracted turns to CXDB, preserves child stdio and exit status, and writes local evidence to `.scratch/cxtx/sessions/`. Transparent capture depends on the child honoring the injected provider base URL environment variables; if a CLI bypasses those overrides, `cxtx` can still record lifecycle turns but cannot observe provider traffic that never reaches the proxy.
 
 **Environment variables:**
 
@@ -230,7 +251,10 @@ cargo test test_append_turn
 cargo test -- --nocapture
 
 # Run tests in specific module
-cargo test --package ai-cxdb-store --lib blob_store
+cargo test --package cxdb-server --lib blob_store
+
+# Run only the cxtx wrapper package
+cargo test -p cxtx
 ```
 
 ### Go Tests
@@ -423,7 +447,7 @@ bundle := map[string]interface{}{
 cargo build
 
 # Run with debugger
-rust-lldb target/debug/ai-cxdb-store
+rust-lldb target/debug/cxdb-server
 
 # Set breakpoint
 (lldb) b blob_store::mod::put
@@ -447,7 +471,7 @@ rust-lldb target/debug/ai-cxdb-store
       "request": "launch",
       "name": "Debug CXDB",
       "cargo": {
-        "args": ["build", "--package=ai-cxdb-store"]
+        "args": ["build", "--package=cxdb-server"]
       },
       "args": [],
       "cwd": "${workspaceFolder}",
@@ -497,7 +521,7 @@ pnpm dev
 cargo install flamegraph
 
 # Profile
-cargo flamegraph --bin ai-cxdb-store
+cargo flamegraph --bin cxdb-server
 
 # Opens flamegraph.svg in browser
 ```

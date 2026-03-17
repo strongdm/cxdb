@@ -60,7 +60,7 @@ cd cxdb
 cargo build --release
 
 # Run the server
-CXDB_DATA_DIR=./data ./target/release/ai-cxdb-store
+CXDB_DATA_DIR=./data ./target/release/cxdb-server
 ```
 
 The server will start on:
@@ -178,6 +178,37 @@ Response:
     }
   ]
 }
+```
+
+## Capture a Local CLI Session with `cxtx`
+
+If you already use `codex` or `claude`, you can capture that session into CXDB without changing the child CLI workflow:
+
+```bash
+# Build the wrapper once
+cargo build --release -p cxtx
+
+# Wrap Codex with the default local CXDB HTTP endpoint
+./target/release/cxtx codex -- --help
+
+# Or wrap Claude against an explicit endpoint
+./target/release/cxtx --url http://127.0.0.1:9010 claude -- --help
+```
+
+After a wrapped run:
+
+- CXDB receives canonical `cxdb.ConversationItem` turns for the session.
+- The first uploaded turn carries `ContextMetadata` and `Provenance`, so the context is searchable in `/v1/contexts`.
+- `cxtx` publishes the bundled canonical `cxdb.ConversationItem` registry descriptor automatically before the first append when needed.
+- Raw provider request, response, and stream evidence is written locally under `.scratch/cxtx/sessions/<stable-session-id>/`.
+- If CXDB is temporarily unavailable, `cxtx` still launches the child, enters queued-delivery mode, and records the degradation plus recovery state in the local ledger and stored lifecycle turns.
+- Transparent capture depends on the child honoring the injected provider base URL environment variables. If a CLI bypasses those overrides, `cxtx` still records lifecycle turns, but it cannot capture provider traffic that never crosses the local proxy.
+
+Use these endpoints to inspect captured runs:
+
+```bash
+curl 'http://localhost:9010/v1/contexts?tag=cxtx/codex&include_provenance=1'
+curl 'http://localhost:9010/v1/contexts?tag=cxtx/claude&include_provenance=1'
 ```
 
 ## Using the Go Client SDK

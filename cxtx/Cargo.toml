@@ -1,0 +1,31 @@
+[package]
+name = "cxtx"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "CLI wrapper that captures claude/codex provider traffic and uploads canonical conversation context into CXDB"
+
+[dependencies]
+anyhow = "1.0"
+async-stream = "0.3"
+axum = { version = "0.7", features = ["macros"] }
+base64 = "0.22"
+bytes = "1.10"
+chrono = { version = "0.4", features = ["clock", "serde"] }
+clap = { version = "4.5", features = ["derive", "env"] }
+cxdb = { path = "../clients/rust" }
+futures-util = "0.3"
+http = "1.3"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
+url = "2.5"
+uuid = { version = "1.18", features = ["v4"] }
+
+[dev-dependencies]
+assert_cmd = "2.0"
+cxdb-server = { path = "../server" }
+predicates = "3.1"
+rmpv = "1.3"
+tempfile = "3.10"

@@ -9,6 +9,7 @@ Built on a Turn DAG + Blob CAS architecture, CXDB gives you:
 - **Content deduplication**: Identical payloads stored once via BLAKE3 hashing
 - **Type-safe projections**: Msgpack storage with typed JSON views for UIs
 - **Built-in UI**: React frontend with turn visualization and custom renderers
+- **First-party CLI capture**: `cxtx` wraps `codex` and `claude` sessions and stores them as canonical conversation turns
 
 ## Quick Start
 
@@ -36,6 +37,13 @@ curl -X POST http://localhost:9010/v1/contexts/1/append \
 open http://localhost:9010
 ```
 
+Capture a local `codex` or `claude` session into CXDB with the first-party wrapper:
+
+```bash
+cargo run -p cxtx -- --help
+cargo run -p cxtx -- codex -- --help
+```
+
 ## Installation
 
 ### From Source
@@ -54,7 +62,7 @@ cd cxdb
 cargo build --release
 
 # Run the server
-./target/release/ai-cxdb-store
+./target/release/cxdb-server
 
 # Build the gateway (optional - for OAuth and frontend serving)
 cd gateway
@@ -201,6 +209,7 @@ CXDB is a three-tier system:
 - **HTTP API**: [docs/http-api.md](docs/http-api.md)
 - **Type Registry**: [docs/type-registry.md](docs/type-registry.md)
 - **Renderers**: [docs/renderers.md](docs/renderers.md)
+- **CLI Wrapper (`cxtx`)**: [cxtx/README.md](cxtx/README.md)
 - **Deployment**: [docs/deployment.md](docs/deployment.md)
 - **Troubleshooting**: [docs/troubleshooting.md](docs/troubleshooting.md)
 - **Development**: [docs/development.md](docs/development.md)

@@ -149,6 +149,27 @@ python agent.py
 
 ---
 
+### 7. [../cxtx/README.md](../cxtx/README.md) - CLI Session Capture Wrapper
+
+**What it demonstrates**: Wrapping an existing `codex` or `claude` CLI so provider traffic is captured, normalized into canonical `cxdb.ConversationItem` turns, and uploaded through the CXDB HTTP API.
+
+**Operations**:
+- Launch a child CLI through a local reverse proxy
+- Preserve child stdin, stdout, stderr, and exit code
+- Append searchable context metadata and provenance on the first turn
+- Publish the bundled canonical `cxdb.ConversationItem` registry descriptor automatically when needed
+- Persist raw provider request, response, and stream evidence under `.scratch/cxtx/sessions/`
+- Depend on the child honoring injected provider base URL variables for transparent traffic capture
+
+**Run it**:
+```bash
+cargo run -p cxtx -- --help
+```
+
+**Use case**: Operator capture of interactive CLI sessions, local debugging, provenance-aware session ingest
+
+---
+
 ## Quick Start
 
 1. **Start the CXDB server** (required for all examples):

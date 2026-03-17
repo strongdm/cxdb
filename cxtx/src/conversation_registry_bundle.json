@@ -1,0 +1,222 @@
+{
+  "registry_version": 1,
+  "bundle_id": "cxdb.conversation-item.v3",
+  "types": {
+    "cxdb.ConversationItem": {
+      "versions": {
+        "3": {
+          "fields": {
+            "1": { "name": "item_type", "type": "string" },
+            "2": { "name": "status", "type": "string", "optional": true },
+            "3": { "name": "timestamp", "type": "timestamp_ms", "optional": true },
+            "4": { "name": "id", "type": "string", "optional": true },
+            "10": { "name": "user_input", "type": "ref", "ref": "cxdb.UserInput", "optional": true },
+            "11": { "name": "turn", "type": "ref", "ref": "cxdb.AssistantTurn", "optional": true },
+            "12": { "name": "system", "type": "ref", "ref": "cxdb.SystemMessage", "optional": true },
+            "13": { "name": "handoff", "type": "ref", "ref": "cxdb.HandoffInfo", "optional": true },
+            "20": { "name": "assistant", "type": "ref", "ref": "cxdb.Assistant", "optional": true },
+            "21": { "name": "tool_call", "type": "ref", "ref": "cxdb.ToolCall", "optional": true },
+            "22": { "name": "tool_result", "type": "ref", "ref": "cxdb.ToolResult", "optional": true },
+            "30": { "name": "context_metadata", "type": "ref", "ref": "cxdb.ContextMetadata", "optional": true }
+          },
+          "renderer": {
+            "esm_url": "builtin:ConversationRenderer"
+          }
+        }
+      }
+    },
+    "cxdb.UserInput": {
+      "versions": {
+        "1": {
+          "fields": {
+            "1": { "name": "text", "type": "string" },
+            "2": { "name": "files", "type": "array", "items": "string", "optional": true }
+          }
+        }
+      }
+    },
+    "cxdb.AssistantTurn": {
+      "versions": {
+        "1": {
+          "fields": {
+            "1": { "name": "text", "type": "string" },
+            "2": { "name": "tool_calls", "type": "array", "items": { "ref": "cxdb.ToolCallItem" }, "optional": true },
+            "3": { "name": "reasoning", "type": "string", "optional": true },
+            "4": { "name": "metrics", "type": "ref", "ref": "cxdb.TurnMetrics", "optional": true },
+            "5": { "name": "agent", "type": "string", "optional": true },
+            "6": { "name": "turn_number", "type": "int64", "optional": true },
+            "7": { "name": "max_turns", "type": "int64", "optional": true },
+            "8": { "name": "finish_reason", "type": "string", "optional": true }
+          }
+        }
+      }
+    },
+    "cxdb.ToolCallItem": {
+      "versions": {
+        "1": {
+          "fields": {
+            "1": { "name": "id", "type": "string" },
+            "2": { "name": "name", "type": "string" },
+            "3": { "name": "args", "type": "string" },
+            "4": { "name": "status", "type": "string" },
+            "5": { "name": "description", "type": "string", "optional": true },
+            "6": { "name": "streaming_output", "type": "string", "optional": true },
+            "7": { "name": "streaming_output_truncated", "type": "bool", "optional": true },
+            "8": { "name": "result", "type": "ref", "ref": "cxdb.ToolCallResult", "optional": true },
+            "9": { "name": "error", "type": "ref", "ref": "cxdb.ToolCallError", "optional": true },
+            "10": { "name": "duration_ms", "type": "int64", "optional": true }
+          }
+        }
+      }
+    },
+    "cxdb.ToolCallResult": {
+      "versions": {
+        "1": {
+          "fields": {
+            "1": { "name": "content", "type": "string" },
+            "2": { "name": "content_truncated", "type": "bool", "optional": true },
+            "3": { "name": "success", "type": "bool" },
+            "4": { "name": "exit_code", "type": "int64", "optional": true }
+          }
+        }
+      }
+    },
+    "cxdb.ToolCallError": {
+      "versions": {
+        "1": {
+          "fields": {
+            "1": { "name": "code", "type": "string", "optional": true },
+            "2": { "name": "message", "type": "string" },
+            "3": { "name": "exit_code", "type": "int64", "optional": true }
+          }
+        }
+      }
+    },
+    "cxdb.TurnMetrics": {
+      "versions": {
+        "1": {
+          "fields": {
+            "1": { "name": "input_tokens", "type": "int64" },
+            "2": { "name": "output_tokens", "type": "int64" },
+            "3": { "name": "total_tokens", "type": "int64" },
+            "4": { "name": "cached_tokens", "type": "int64", "optional": true },
+            "5": { "name": "reasoning_tokens", "type": "int64", "optional": true },
+            "6": { "name": "duration_ms", "type": "int64", "optional": true },
+            "7": { "name": "model", "type": "string", "optional": true }
+          }
+        }
+      }
+    },
+    "cxdb.SystemMessage": {
+      "versions": {
+        "1": {
+          "fields": {
+            "1": { "name": "kind", "type": "string" },
+            "2": { "name": "title", "type": "string", "optional": true },
+            "3": { "name": "content", "type": "string" }
+          }
+        }
+      }
+    },
+    "cxdb.HandoffInfo": {
+      "versions": {
+        "1": {
+          "fields": {
+            "1": { "name": "from_agent", "type": "string" },
+            "2": { "name": "to_agent", "type": "string" },
+            "3": { "name": "tool_name", "type": "string", "optional": true },
+            "4": { "name": "input", "type": "string", "optional": true },
+            "5": { "name": "reason", "type": "string", "optional": true }
+          }
+        }
+      }
+    },
+    "cxdb.Assistant": {
+      "versions": {
+        "1": {
+          "fields": {
+            "1": { "name": "text", "type": "string" },
+            "2": { "name": "reasoning", "type": "string", "optional": true },
+            "3": { "name": "model", "type": "string", "optional": true },
+            "4": { "name": "input_tokens", "type": "int64", "optional": true },
+            "5": { "name": "output_tokens", "type": "int64", "optional": true },
+            "6": { "name": "stop_reason", "type": "string", "optional": true }
+          }
+        }
+      }
+    },
+    "cxdb.ToolCall": {
+      "versions": {
+        "1": {
+          "fields": {
+            "1": { "name": "call_id", "type": "string" },
+            "2": { "name": "name", "type": "string" },
+            "3": { "name": "args", "type": "string" },
+            "4": { "name": "description", "type": "string", "optional": true }
+          }
+        }
+      }
+    },
+    "cxdb.ToolResult": {
+      "versions": {
+        "1": {
+          "fields": {
+            "1": { "name": "call_id", "type": "string" },
+            "2": { "name": "content", "type": "string" },
+            "3": { "name": "is_error", "type": "bool" },
+            "4": { "name": "exit_code", "type": "int64", "optional": true },
+            "5": { "name": "streaming_output", "type": "string", "optional": true },
+            "6": { "name": "output_truncated", "type": "bool", "optional": true },
+            "7": { "name": "duration_ms", "type": "int64", "optional": true }
+          }
+        }
+      }
+    },
+    "cxdb.ContextMetadata": {
+      "versions": {
+        "1": {
+          "fields": {
+            "1": { "name": "client_tag", "type": "string", "optional": true },
+            "2": { "name": "title", "type": "string", "optional": true },
+            "3": { "name": "labels", "type": "array", "items": "string", "optional": true },
+            "4": { "name": "custom", "type": "map", "optional": true },
+            "10": { "name": "provenance", "type": "ref", "ref": "cxdb.Provenance", "optional": true }
+          }
+        }
+      }
+    },
+    "cxdb.Provenance": {
+      "versions": {
+        "1": {
+          "fields": {
+            "1": { "name": "parent_context_id", "type": "u64", "optional": true },
+            "2": { "name": "spawn_reason", "type": "string", "optional": true },
+            "3": { "name": "root_context_id", "type": "u64", "optional": true },
+            "10": { "name": "trace_id", "type": "string", "optional": true },
+            "11": { "name": "span_id", "type": "string", "optional": true },
+            "12": { "name": "correlation_id", "type": "string", "optional": true },
+            "20": { "name": "on_behalf_of", "type": "string", "optional": true },
+            "21": { "name": "on_behalf_of_source", "type": "string", "optional": true },
+            "22": { "name": "on_behalf_of_email", "type": "string", "optional": true },
+            "30": { "name": "writer_method", "type": "string", "optional": true },
+            "31": { "name": "writer_subject", "type": "string", "optional": true },
+            "32": { "name": "writer_issuer", "type": "string", "optional": true },
+            "40": { "name": "service_name", "type": "string", "optional": true },
+            "41": { "name": "service_version", "type": "string", "optional": true },
+            "42": { "name": "service_instance_id", "type": "string", "optional": true },
+            "43": { "name": "process_pid", "type": "int64", "optional": true },
+            "44": { "name": "process_owner", "type": "string", "optional": true },
+            "45": { "name": "host_name", "type": "string", "optional": true },
+            "46": { "name": "host_arch", "type": "string", "optional": true },
+            "50": { "name": "client_address", "type": "string", "optional": true },
+            "51": { "name": "client_port", "type": "int64", "optional": true },
+            "60": { "name": "env_vars", "type": "map", "optional": true },
+            "70": { "name": "sdk_name", "type": "string", "optional": true },
+            "71": { "name": "sdk_version", "type": "string", "optional": true },
+            "80": { "name": "captured_at", "type": "timestamp_ms", "optional": true }
+          }
+        }
+      }
+    }
+  }
+}
