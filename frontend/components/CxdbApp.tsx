@@ -462,13 +462,18 @@ export default function CxdbApp() {
       <header className="h-14 px-4 border-b border-theme-border-dim bg-theme-bg-secondary/50 flex items-center justify-between shrink-0">
         {/* Left: Logo + Title + Env Pills */}
         <div className="flex items-center gap-3">
-          <div className="w-8 h-8 rounded-lg bg-theme-accent-muted border border-theme-accent/30 flex items-center justify-center">
-            <Database className="w-4 h-4 text-theme-accent" />
-          </div>
-          <div>
-            <h1 className="text-sm font-semibold text-theme-text">CXDB</h1>
-            <p className="text-xs text-theme-text-dim">AI Context Store</p>
-          </div>
+          <a
+            href="/"
+            className="flex items-center gap-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-theme-accent/30"
+          >
+            <div className="w-8 h-8 rounded-lg bg-theme-accent-muted border border-theme-accent/30 flex items-center justify-center">
+              <Database className="w-4 h-4 text-theme-accent" />
+            </div>
+            <div>
+              <h1 className="text-sm font-semibold text-theme-text">CXDB</h1>
+              <p className="text-xs text-theme-text-dim">AI Context Store</p>
+            </div>
+          </a>
 
           {/* Environment Filter Pills - vertically centered with logo */}
           <div className="flex items-center gap-1 p-0.5 bg-theme-bg-tertiary/50 rounded-lg ml-4">
