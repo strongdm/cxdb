@@ -8,7 +8,7 @@ import { Database, Layers, Plus, X, AlertCircle, Check, Zap, Radio, ChevronDown,
 import { ThemeSelector } from '@/components/ThemeSelector';
 import { cn, normalizeContextId } from '@/lib/utils';
 import { healthCheck, fetchContexts, searchContexts } from '@/lib/api';
-import { parse as parseCql, validate as validateCql, formatError as formatCqlError, buildFallbackQuery } from '@/lib/cql';
+import { validate as validateCql, buildFallbackQuery, appendTagSearchClause, extractTagSearchClause } from '@/lib/cql';
 import { useEventStream, useMockEventGenerator, useUrlRouter, parseUrl, type RouteState } from '@/hooks';
 import { ConnectionStatus, ActivityFeed } from '@/components/live';
 import { ServerHealthDashboard } from '@/components/dashboard';
@@ -286,7 +286,8 @@ export default function CxdbApp() {
   }, [contexts, selectedTag, sortByTag, searchResults]);
 
   const handleTagSelect = useCallback((tag: string) => {
-    setSelectedTag(tag);
+    setSearchQuery(prev => appendTagSearchClause(prev, tag));
+    setSelectedTag(null);
     setTagFilterOpen(false);
     setFocusedContextIndex(0);
   }, []);
@@ -337,13 +338,26 @@ export default function CxdbApp() {
       }
       searchAbortRef.current = new AbortController();
 
-      // Try to validate as CQL first
-      const validation = validateCql(query);
-      let effectiveQuery = query;
+      const { baseQuery, tag } = extractTagSearchClause(query);
+      let effectiveQuery = '';
 
-      // If not valid CQL, treat as keyword search across all fields
-      if (!validation.ok) {
-        effectiveQuery = buildFallbackQuery(query);
+      if (baseQuery) {
+        const validation = validateCql(baseQuery);
+        effectiveQuery = validation.ok ? baseQuery : buildFallbackQuery(baseQuery);
+      }
+
+      if (tag) {
+        const tagClause = `tag = "${tag.replace(/"/g, '\\"')}"`;
+        effectiveQuery = effectiveQuery
+          ? `(${effectiveQuery}) AND ${tagClause}`
+          : tagClause;
+      }
+
+      if (!effectiveQuery) {
+        setSearchResults(null);
+        setSearchError(null);
+        setIsSearching(false);
+        return;
       }
 
       setIsSearching(true);

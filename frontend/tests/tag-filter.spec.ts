@@ -38,7 +38,7 @@ async function createTaggedContext(
 }
 
 test.describe('Tag Filter', () => {
-  test('clicking a context tag chip filters the context list to that tag', async ({
+  test('clicking a context tag chip appends a CQL tag clause and filters the context list', async ({
     apiPage,
     serverHttpUrl,
   }) => {
@@ -52,12 +52,32 @@ test.describe('Tag Filter', () => {
     await expect(apiPage.locator(`[data-context-id="${dotrunnerId}"]`)).toBeVisible();
     await expect(apiPage.locator(`[data-context-id="${claudeTwoId}"]`)).toBeVisible();
 
+    const searchInput = apiPage.locator('input[placeholder*="Search"]');
     await apiPage.locator('[data-context-tag-filter="claude-code"]').first().click();
 
+    await expect(searchInput).toHaveValue('tag = "claude-code"');
+    await expect(apiPage.getByRole('button', { name: 'All tags' })).toBeVisible();
     await expect(apiPage.locator('[data-context-id]')).toHaveCount(2);
     await expect(apiPage.locator(`[data-context-id="${claudeOneId}"]`)).toBeVisible();
     await expect(apiPage.locator(`[data-context-id="${claudeTwoId}"]`)).toBeVisible();
     await expect(apiPage.locator(`[data-context-id="${dotrunnerId}"]`)).toHaveCount(0);
-    await expect(apiPage.getByRole('button', { name: 'claude-code', exact: true })).toBeVisible();
+  });
+
+  test('clicking a context tag chip appends the tag clause to an existing search query', async ({
+    apiPage,
+    serverHttpUrl,
+  }) => {
+    const claudeId = await createTaggedContext(serverHttpUrl, 'claude-code', 'Claude Search Compose');
+    const dotrunnerId = await createTaggedContext(serverHttpUrl, 'dotrunner', 'Dotrunner Search Compose');
+
+    await apiPage.goto('/');
+
+    const searchInput = apiPage.locator('input[placeholder*="Search"]');
+    await searchInput.fill('title ^~= "Claude"');
+    await apiPage.locator('[data-context-tag-filter="claude-code"]').first().click();
+
+    await expect(searchInput).toHaveValue('title ^~= "Claude" AND tag = "claude-code"');
+    await expect(apiPage.locator(`[data-context-id="${claudeId}"]`)).toBeVisible();
+    await expect(apiPage.locator(`[data-context-id="${dotrunnerId}"]`)).toHaveCount(0);
   });
 });

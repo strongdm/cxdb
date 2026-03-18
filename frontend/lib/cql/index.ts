@@ -63,6 +63,50 @@ export function formatError(error: import('./types').CqlError): string {
   return `${error.message} (line ${error.position.line}, column ${error.position.column})`;
 }
 
+const TRAILING_TAG_CLAUSE_PATTERN = /\s+AND\s+tag\s*=\s*"((?:\\"|[^"])*)"$/i;
+const EXACT_TAG_CLAUSE_PATTERN = /^tag\s*=\s*"((?:\\"|[^"])*)"$/i;
+
+/**
+ * Split the visible search text into its base query and any appended trailing tag clause.
+ */
+export function extractTagSearchClause(query: string): { baseQuery: string; tag: string | null } {
+  const trimmedQuery = query.trim();
+  const exactMatch = trimmedQuery.match(EXACT_TAG_CLAUSE_PATTERN);
+  if (exactMatch) {
+    return {
+      baseQuery: '',
+      tag: exactMatch[1].replace(/\\"/g, '"'),
+    };
+  }
+
+  const trailingMatch = trimmedQuery.match(TRAILING_TAG_CLAUSE_PATTERN);
+  if (!trailingMatch) {
+    return { baseQuery: trimmedQuery, tag: null };
+  }
+
+  return {
+    baseQuery: trimmedQuery.slice(0, trailingMatch.index).trim(),
+    tag: trailingMatch[1].replace(/\\"/g, '"'),
+  };
+}
+
+/**
+ * Replace any existing trailing tag clause with the clicked context tag.
+ */
+export function appendTagSearchClause(query: string, tag: string): string {
+  const normalizedTag = tag.trim();
+  const escapedTag = normalizedTag.replace(/"/g, '\\"');
+  const { baseQuery } = extractTagSearchClause(query);
+
+  if (!normalizedTag) {
+    return baseQuery;
+  }
+
+  return baseQuery
+    ? `${baseQuery} AND tag = "${escapedTag}"`
+    : `tag = "${escapedTag}"`;
+}
+
 /**
  * Build a fallback query that searches across all text fields.
  * Used when input doesn't parse as valid CQL - treats it as a keyword search.
