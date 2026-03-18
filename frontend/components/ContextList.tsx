@@ -2,7 +2,7 @@
 
 import { memo, useMemo, useState, useEffect, useCallback, useRef } from 'react';
 import type { ContextEntry, StoreEvent } from '@/types';
-import { cn } from '@/lib/utils';
+import { cn, formatTimestamp } from '@/lib/utils';
 import { Database, GitBranch, GitFork, ChevronRight, Folder, User, Tag } from './icons';
 import { PresenceIndicator, LiveTimestamp } from './live';
 import type { PresenceState } from './live';
@@ -20,6 +20,47 @@ const DEFAULT_TAG_COLOR = { bg: 'bg-theme-tag-default-bg', text: 'text-theme-tag
 
 function getTagColor(tag: string) {
   return TAG_COLORS[tag.toLowerCase()] || DEFAULT_TAG_COLOR;
+}
+
+function getContextBadgeLabel(context: ContextEntry): string | null {
+  const provenance = context.provenance;
+  const username =
+    provenance?.on_behalf_of ||
+    provenance?.process_owner ||
+    provenance?.on_behalf_of_email ||
+    null;
+  const hostname = provenance?.host_name || null;
+
+  if (username && hostname) {
+    return `${username}@${hostname}`;
+  }
+  if (username) {
+    return username;
+  }
+  if (hostname) {
+    return hostname;
+  }
+  return context.client_tag || null;
+}
+
+function basename(path?: string): string | null {
+  if (!path) return null;
+  const trimmed = path.replace(/\/+$/, '');
+  const segments = trimmed.split('/').filter(Boolean);
+  return segments.length > 0 ? segments[segments.length - 1] : null;
+}
+
+function getContextTitleLabel(context: ContextEntry): string | null {
+  const provider = context.client_tag?.split('/').pop() || null;
+  const worktreeName = basename(context.provenance?.env?.PWD);
+  const timestampSource = context.provenance?.captured_at ?? context.created_at_unix_ms;
+  const timestamp = timestampSource ? formatTimestamp(timestampSource) : null;
+
+  if (provider && worktreeName && timestamp) {
+    return `${provider}: ${worktreeName} ${timestamp}`;
+  }
+
+  return context.title || null;
 }
 
 interface ContextListProps {
@@ -73,6 +114,8 @@ const ContextListItem = memo(function ContextListItem({
   const hasParent = !!(provenance?.parent_context_id);
   const onBehalfOf = provenance?.on_behalf_of || provenance?.on_behalf_of_email;
   const sourceStyle = provenance?.on_behalf_of_source ? getSourceStyle(provenance.on_behalf_of_source) : null;
+  const badgeLabel = getContextBadgeLabel(context);
+  const titleLabel = getContextTitleLabel(context);
 
   return (
     <button
@@ -92,13 +135,13 @@ const ContextListItem = memo(function ContextListItem({
       )}
     >
       {/* Title row (if available) */}
-      {context.title && (
+      {titleLabel && (
         <div className="flex items-center gap-1.5 mb-1">
           <span className={cn(
             'text-sm font-medium truncate',
             isSelected ? 'text-theme-text' : 'text-theme-text-secondary'
           )}>
-            {context.title}
+            {titleLabel}
           </span>
         </div>
       )}
@@ -123,14 +166,16 @@ const ContextListItem = memo(function ContextListItem({
           )}>
             {context.context_id}
           </span>
-          {/* Client tag badge */}
-          {context.client_tag && (
+          {/* Context provenance badge */}
+          {badgeLabel && (
             <span className={cn(
               'px-1.5 py-0.5 rounded text-[10px] font-medium truncate',
-              getTagColor(context.client_tag).bg,
-              getTagColor(context.client_tag).text
-            )}>
-              {context.client_tag}
+              getTagColor(context.client_tag || 'default').bg,
+              getTagColor(context.client_tag || 'default').text
+            )}
+            title={badgeLabel}
+            >
+              {badgeLabel}
             </span>
           )}
           {/* Filesystem snapshot indicator */}
