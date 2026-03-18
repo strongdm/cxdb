@@ -37,7 +37,7 @@ RUN go mod download
 COPY gateway/ ./
 
 # Copy frontend build output for embedding
-COPY --from=frontend /app/out ./pkg/proxy/web/
+COPY --from=frontend /app/.next-build ./pkg/proxy/web/
 
 # Build with CGO enabled for SQLite
 RUN --mount=type=cache,target=/root/.cache/go-build \
