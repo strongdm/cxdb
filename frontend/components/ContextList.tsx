@@ -68,6 +68,7 @@ interface ContextListProps {
   selectedId?: string;
   focusedIndex?: number;
   onSelect: (contextId: string) => void;
+  onTagClick?: (tag: string) => void;
   lastEvent?: StoreEvent | null;
 }
 
@@ -86,6 +87,7 @@ const ContextListItem = memo(function ContextListItem({
   isNew,
   isUpdated,
   itemRef,
+  onTagClick,
 }: {
   context: ContextEntry;
   isSelected: boolean;
@@ -94,6 +96,7 @@ const ContextListItem = memo(function ContextListItem({
   isNew?: boolean;
   isUpdated?: boolean;
   itemRef?: React.RefObject<HTMLButtonElement>;
+  onTagClick?: (tag: string) => void;
 }) {
   const presenceState: PresenceState = useMemo(() => {
     if (context.is_live) {
@@ -116,6 +119,13 @@ const ContextListItem = memo(function ContextListItem({
   const sourceStyle = provenance?.on_behalf_of_source ? getSourceStyle(provenance.on_behalf_of_source) : null;
   const badgeLabel = getContextBadgeLabel(context);
   const titleLabel = getContextTitleLabel(context);
+  const showDedicatedTagChip = !!context.client_tag && badgeLabel !== context.client_tag;
+  const handleTagClick = useCallback((event: React.MouseEvent<HTMLSpanElement>) => {
+    if (!context.client_tag) return;
+    event.preventDefault();
+    event.stopPropagation();
+    onTagClick?.(context.client_tag);
+  }, [context.client_tag, onTagClick]);
 
   return (
     <button
@@ -170,12 +180,30 @@ const ContextListItem = memo(function ContextListItem({
           {badgeLabel && (
             <span className={cn(
               'px-1.5 py-0.5 rounded text-[10px] font-medium truncate',
+              badgeLabel === context.client_tag && onTagClick && 'cursor-pointer hover:opacity-90',
               getTagColor(context.client_tag || 'default').bg,
               getTagColor(context.client_tag || 'default').text
             )}
+            data-context-tag-filter={badgeLabel === context.client_tag ? context.client_tag ?? undefined : undefined}
+            onClick={badgeLabel === context.client_tag && onTagClick ? handleTagClick : undefined}
             title={badgeLabel}
             >
               {badgeLabel}
+            </span>
+          )}
+          {showDedicatedTagChip && (
+            <span
+              className={cn(
+                'inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium truncate cursor-pointer hover:opacity-90',
+                getTagColor(context.client_tag || 'default').bg,
+                getTagColor(context.client_tag || 'default').text
+              )}
+              data-context-tag-filter={context.client_tag ?? undefined}
+              onClick={handleTagClick}
+              title={`Filter contexts by tag ${context.client_tag}`}
+            >
+              <Tag className="w-2.5 h-2.5" />
+              {context.client_tag}
             </span>
           )}
           {/* Filesystem snapshot indicator */}
@@ -252,7 +280,14 @@ const ContextListItem = memo(function ContextListItem({
   );
 });
 
-export function ContextList({ contexts, selectedId, focusedIndex = 0, onSelect, lastEvent }: ContextListProps) {
+export function ContextList({
+  contexts,
+  selectedId,
+  focusedIndex = 0,
+  onSelect,
+  onTagClick,
+  lastEvent,
+}: ContextListProps) {
   const [animationState, setAnimationState] = useState<AnimationState>({});
   const focusedRef = useRef<HTMLButtonElement | null>(null);
 
@@ -335,6 +370,7 @@ export function ContextList({ contexts, selectedId, focusedIndex = 0, onSelect, 
           isSelected={selectedId === context.context_id}
           isFocused={index === focusedIndex}
           onSelect={() => onSelect(context.context_id)}
+          onTagClick={onTagClick}
           isNew={animationState[context.context_id]?.isNew}
           isUpdated={animationState[context.context_id]?.isUpdated}
           itemRef={index === focusedIndex ? focusedRef as React.RefObject<HTMLButtonElement> : undefined}

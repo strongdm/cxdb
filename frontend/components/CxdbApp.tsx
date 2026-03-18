@@ -251,12 +251,7 @@ export default function CxdbApp() {
 
   // Filter and sort contexts
   const filteredContexts = useMemo(() => {
-    // If we have search results, use those instead
-    if (searchResults) {
-      return searchResults.contexts;
-    }
-
-    let result = contexts;
+    let result = searchResults?.contexts ?? contexts;
 
     // Filter by selected tag
     if (selectedTag) {
@@ -289,6 +284,12 @@ export default function CxdbApp() {
 
     return result;
   }, [contexts, selectedTag, sortByTag, searchResults]);
+
+  const handleTagSelect = useCallback((tag: string) => {
+    setSelectedTag(tag);
+    setTagFilterOpen(false);
+    setFocusedContextIndex(0);
+  }, []);
 
   // Reset focused index when filtered contexts change
   useEffect(() => {
@@ -770,6 +771,7 @@ export default function CxdbApp() {
                     selectedId={selectedContextId || undefined}
                     focusedIndex={focusedContextIndex}
                     onSelect={handleSelectContext}
+                    onTagClick={handleTagSelect}
                     lastEvent={lastEvent}
                   />
                 )}
