@@ -111,24 +111,7 @@ pub fn finalize_json(
         }
     };
 
-    match parse_assistant_message(
-        payload
-            .get("choices")
-            .and_then(Value::as_array)
-            .and_then(|choices| choices.first())
-            .and_then(|choice| choice.get("message"))
-            .unwrap_or(&Value::Null),
-        payload
-            .get("model")
-            .and_then(Value::as_str)
-            .or(exchange.model.as_deref()),
-        payload
-            .get("choices")
-            .and_then(Value::as_array)
-            .and_then(|choices| choices.first())
-            .and_then(|choice| choice.get("finish_reason"))
-            .and_then(Value::as_str),
-    ) {
+    match parse_assistant_payload(&payload, exchange.model.as_deref()) {
         Ok(Some(item)) => vec![session.append_history_item(&exchange.exchange_id, item)],
         Ok(None) => Vec::new(),
         Err(err) => vec![session.provider_error_turn(
@@ -224,6 +207,11 @@ impl OpenAiExchange {
             }
         };
 
+        if let Some(event_type) = payload.get("type").and_then(Value::as_str) {
+            self.absorb_responses_event(event_type, &payload);
+            return;
+        }
+
         if self.model.is_none() {
             self.model = payload
                 .get("model")
@@ -254,6 +242,36 @@ impl OpenAiExchange {
             }
         }
     }
+
+    fn absorb_responses_event(&mut self, event_type: &str, payload: &Value) {
+        match event_type {
+            "response.created" | "response.in_progress" | "response.completed" => {
+                if let Some(response) = payload.get("response") {
+                    if self.model.is_none() {
+                        self.model = response
+                            .get("model")
+                            .and_then(Value::as_str)
+                            .map(|value| value.to_string());
+                    }
+                    if let Some(status) = response.get("status").and_then(Value::as_str) {
+                        self.finish_reason = Some(status.to_string());
+                    }
+                    absorb_responses_output(response, &mut self.content, &mut self.tool_calls);
+                }
+            }
+            "response.output_text.delta" => {
+                if let Some(delta) = payload.get("delta").and_then(Value::as_str) {
+                    self.content.push_str(delta);
+                }
+            }
+            "response.output_item.added" | "response.output_item.done" => {
+                if let Some(item) = payload.get("item") {
+                    absorb_responses_output_item(item, &mut self.content, &mut self.tool_calls);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 pub fn parse_sse_buffer(buffer: &mut String) -> Vec<SseFrame> {
@@ -277,15 +295,25 @@ pub fn parse_sse_buffer(buffer: &mut String) -> Vec<SseFrame> {
 }
 
 fn parse_request_history(payload: &Value) -> Result<Vec<HistoryItem>, String> {
-    let messages = payload
-        .get("messages")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "OpenAI request is missing messages array".to_string())?;
     let model = payload
         .get("model")
         .and_then(Value::as_str)
         .map(|value| value.to_string());
 
+    if let Some(messages) = payload.get("messages").and_then(Value::as_array) {
+        return parse_message_history(messages, model);
+    }
+    if let Some(input) = payload.get("input").and_then(Value::as_array) {
+        return parse_input_history(input, model);
+    }
+
+    Err("OpenAI request is missing messages or input array".to_string())
+}
+
+fn parse_message_history(
+    messages: &[Value],
+    model: Option<String>,
+) -> Result<Vec<HistoryItem>, String> {
     let mut history = Vec::new();
     for message in messages {
         let role = message
@@ -320,19 +348,110 @@ fn parse_request_history(payload: &Value) -> Result<Vec<HistoryItem>, String> {
     Ok(history)
 }
 
-fn parse_assistant_message(
-    message: &Value,
-    model: Option<&str>,
-    finish_reason: Option<&str>,
-) -> Result<Option<HistoryItem>, String> {
-    if message.is_null() {
+fn parse_input_history(input: &[Value], model: Option<String>) -> Result<Vec<HistoryItem>, String> {
+    let mut history = Vec::new();
+    for item in input {
+        if item
+            .get("type")
+            .and_then(Value::as_str)
+            .is_some_and(|item_type| item_type != "message")
+        {
+            continue;
+        }
+
+        let role = item
+            .get("role")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "OpenAI input item missing role".to_string())?;
+        match role {
+            "user" => history.push(HistoryItem::UserInput {
+                text: content_to_text(item.get("content").unwrap_or(&Value::Null)),
+                files: Vec::new(),
+            }),
+            "assistant" => history.push(HistoryItem::AssistantTurn {
+                text: content_to_text(item.get("content").unwrap_or(&Value::Null)),
+                tool_calls: Vec::new(),
+                model: model.clone(),
+                finish_reason: None,
+            }),
+            "tool" => history.push(HistoryItem::ToolResult {
+                call_id: item
+                    .get("call_id")
+                    .or_else(|| item.get("tool_call_id"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                content: content_to_text(item.get("content").unwrap_or(&Value::Null)),
+                is_error: false,
+            }),
+            _ => {}
+        }
+    }
+    Ok(history)
+}
+
+fn parse_assistant_payload(payload: &Value, fallback_model: Option<&str>) -> Result<Option<HistoryItem>, String> {
+    if let Some(message) = payload
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|choices| choices.first())
+        .and_then(|choice| choice.get("message"))
+    {
+        return Ok(Some(HistoryItem::AssistantTurn {
+            text: content_to_text(message.get("content").unwrap_or(&Value::Null)),
+            tool_calls: parse_tool_calls(message.get("tool_calls")),
+            model: payload
+                .get("model")
+                .and_then(Value::as_str)
+                .or(fallback_model)
+                .map(|value| value.to_string()),
+            finish_reason: payload
+                .get("choices")
+                .and_then(Value::as_array)
+                .and_then(|choices| choices.first())
+                .and_then(|choice| choice.get("finish_reason"))
+                .and_then(Value::as_str)
+                .map(|value| value.to_string()),
+        }));
+    }
+
+    let response = payload.get("response").unwrap_or(payload);
+    let output = response
+        .get("output")
+        .and_then(Value::as_array)
+        .or_else(|| payload.get("output").and_then(Value::as_array));
+    let Some(output) = output else {
+        return Ok(None);
+    };
+
+    let text = output
+        .iter()
+        .filter(|item| {
+            item.get("type").and_then(Value::as_str) == Some("message")
+                && item.get("role").and_then(Value::as_str) == Some("assistant")
+        })
+        .map(|item| content_to_text(item.get("content").unwrap_or(&Value::Null)))
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let tool_calls = parse_responses_tool_calls(output);
+
+    if text.is_empty() && tool_calls.is_empty() {
         return Ok(None);
     }
+
     Ok(Some(HistoryItem::AssistantTurn {
-        text: content_to_text(message.get("content").unwrap_or(&Value::Null)),
-        tool_calls: parse_tool_calls(message.get("tool_calls")),
-        model: model.map(|value| value.to_string()),
-        finish_reason: finish_reason.map(|value| value.to_string()),
+        text,
+        tool_calls,
+        model: response
+            .get("model")
+            .and_then(Value::as_str)
+            .or(fallback_model)
+            .map(|value| value.to_string()),
+        finish_reason: response
+            .get("status")
+            .and_then(Value::as_str)
+            .map(|value| value.to_string()),
     }))
 }
 
@@ -368,6 +487,30 @@ fn parse_tool_calls(value: Option<&Value>) -> Vec<ToolCallRecord> {
         .unwrap_or_default()
 }
 
+fn parse_responses_tool_calls(items: &[Value]) -> Vec<ToolCallRecord> {
+    items
+        .iter()
+        .filter(|item| item.get("type").and_then(Value::as_str) == Some("function_call"))
+        .map(|item| {
+            tool_call_record(
+                item.get("call_id")
+                    .or_else(|| item.get("id"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                item.get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                item.get("arguments")
+                    .or_else(|| item.get("input"))
+                    .map(jsonish_to_string)
+                    .unwrap_or_default(),
+            )
+        })
+        .collect()
+}
+
 fn absorb_tool_call_delta(slots: &mut Vec<PartialToolCall>, delta: &Value) {
     let index = delta
         .get("index")
@@ -387,6 +530,70 @@ fn absorb_tool_call_delta(slots: &mut Vec<PartialToolCall>, delta: &Value) {
         if let Some(arguments) = function.get("arguments") {
             slot.args.push_str(&jsonish_to_string(arguments));
         }
+    }
+}
+
+fn absorb_responses_output(response: &Value, content: &mut String, tool_calls: &mut Vec<PartialToolCall>) {
+    let Some(items) = response.get("output").and_then(Value::as_array) else {
+        return;
+    };
+    for item in items {
+        absorb_responses_output_item(item, content, tool_calls);
+    }
+}
+
+fn absorb_responses_output_item(
+    item: &Value,
+    content: &mut String,
+    tool_calls: &mut Vec<PartialToolCall>,
+) {
+    match item.get("type").and_then(Value::as_str) {
+        Some("message") => {
+            if content.is_empty() {
+                content.push_str(&content_to_text(item.get("content").unwrap_or(&Value::Null)));
+            }
+        }
+        Some("function_call") => {
+            let call_id = item
+                .get("call_id")
+                .or_else(|| item.get("id"))
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if call_id.is_empty() {
+                return;
+            }
+            if let Some(existing) = tool_calls.iter_mut().find(|slot| slot.call_id == call_id) {
+                if existing.name.is_empty() {
+                    existing.name = item
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                }
+                if existing.args.is_empty() {
+                    existing.args = item
+                        .get("arguments")
+                        .or_else(|| item.get("input"))
+                        .map(jsonish_to_string)
+                        .unwrap_or_default();
+                }
+            } else {
+                tool_calls.push(PartialToolCall {
+                    call_id: call_id.to_string(),
+                    name: item
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    args: item
+                        .get("arguments")
+                        .or_else(|| item.get("input"))
+                        .map(jsonish_to_string)
+                        .unwrap_or_default(),
+                });
+            }
+        }
+        _ => {}
     }
 }
 
@@ -489,6 +696,18 @@ mod tests {
                 }),
                 expected_kinds: vec!["user_input", "assistant_turn"],
             },
+            Case {
+                name: "responses api input captures only conversation roles",
+                payload: json!({
+                    "model": "gpt-5.4",
+                    "input": [
+                        {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "system instructions"}]},
+                        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hello"}]},
+                        {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "hi"}]}
+                    ]
+                }),
+                expected_kinds: vec!["user_input", "assistant_turn"],
+            },
         ];
 
         for case in cases {
@@ -527,5 +746,30 @@ mod tests {
         assert_eq!(exchange.content, "hello");
         assert_eq!(exchange.tool_calls.len(), 1);
         assert_eq!(exchange.tool_calls[0].name, "lookup");
+    }
+
+    #[test]
+    fn stream_accumulator_collects_responses_output_text() {
+        let mut exchange =
+            OpenAiExchange::new("exchange-0001".to_string(), Some("gpt-5.4".to_string()));
+        exchange.absorb_sse_frame(&SseFrame {
+            event: Some("response.output_text.delta".to_string()),
+            data: "{\"type\":\"response.output_text.delta\",\"delta\":\"Hello\"}".to_string(),
+            raw: String::new(),
+        });
+        exchange.absorb_sse_frame(&SseFrame {
+            event: Some("response.output_text.delta".to_string()),
+            data: "{\"type\":\"response.output_text.delta\",\"delta\":\" world\"}".to_string(),
+            raw: String::new(),
+        });
+        exchange.absorb_sse_frame(&SseFrame {
+            event: Some("response.completed".to_string()),
+            data: "{\"type\":\"response.completed\",\"response\":{\"model\":\"gpt-5.4\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Hello world\"}]}]}}".to_string(),
+            raw: String::new(),
+        });
+
+        assert_eq!(exchange.content, "Hello world");
+        assert_eq!(exchange.model.as_deref(), Some("gpt-5.4"));
+        assert_eq!(exchange.finish_reason.as_deref(), Some("completed"));
     }
 }

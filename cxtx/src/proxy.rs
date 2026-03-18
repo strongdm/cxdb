@@ -12,7 +12,7 @@ use serde_json::Value;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
-use tokio::sync::{oneshot, RwLock};
+use tokio::sync::{mpsc, oneshot, RwLock};
 use url::Url;
 
 use crate::delivery::DeliveryHandle;
@@ -293,11 +293,11 @@ async fn stream_response(
     let mut exchange_state = prepared.state;
     let mut stream_artifact_refs = artifact_refs.clone();
     let request_id_for_stream = request_id.clone();
-    let raw_stream = String::new();
+    let (tx, rx) = mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(32);
     let stream = upstream_response.bytes_stream();
-    let stream = stream! {
+    tokio::spawn(async move {
         let mut parse_buffer = String::new();
-        let mut raw_stream = raw_stream;
+        let mut raw_stream = String::new();
         futures_util::pin_mut!(stream);
         while let Some(chunk) = stream.next().await {
             match chunk {
@@ -326,7 +326,9 @@ async fn stream_response(
                         }
                         exchange_state.absorb_sse_frame(&frame);
                     }
-                    yield Ok::<bytes::Bytes, std::io::Error>(chunk);
+                    if tx.send(Ok(chunk)).await.is_err() {
+                        // Keep draining upstream so capture completes even if downstream disconnects.
+                    }
                 }
                 Err(err) => {
                     delivery.enqueue_turn(session.provider_error_turn(
@@ -336,6 +338,9 @@ async fn stream_response(
                         request_id_for_stream.as_deref(),
                         &stream_artifact_refs,
                     )).await.ok();
+                    let _ = tx
+                        .send(Err(std::io::Error::other(err.to_string())))
+                        .await;
                     break;
                 }
             }
@@ -375,6 +380,13 @@ async fn stream_response(
             },
         );
         enqueue_turns(&delivery, turns).await;
+    });
+
+    let stream = stream! {
+        let mut rx = rx;
+        while let Some(item) = rx.recv().await {
+            yield item;
+        }
     };
 
     let mut response = Response::builder().status(status);
@@ -403,7 +415,7 @@ fn forwardable_headers(headers: &HeaderMap) -> Vec<(HeaderName, HeaderValue)> {
     headers
         .iter()
         .filter_map(|(name, value)| {
-            if is_hop_by_hop(name.as_str()) {
+            if is_hop_by_hop(name.as_str()) || name.as_str().eq_ignore_ascii_case("host") {
                 None
             } else {
                 Some((name.clone(), value.clone()))
@@ -453,4 +465,29 @@ fn is_hop_by_hop(name: &str) -> bool {
             | "transfer-encoding"
             | "upgrade"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::forwardable_headers;
+    use axum::http::{HeaderMap, HeaderValue};
+
+    #[test]
+    fn forwardable_headers_drop_host_but_keep_authorization() {
+        let mut headers = HeaderMap::new();
+        headers.insert("host", HeaderValue::from_static("127.0.0.1:12345"));
+        headers.insert("authorization", HeaderValue::from_static("Bearer test"));
+
+        let forwarded = forwardable_headers(&headers);
+        assert!(
+            !forwarded
+                .iter()
+                .any(|(name, _)| name.as_str().eq_ignore_ascii_case("host"))
+        );
+        assert!(
+            forwarded
+                .iter()
+                .any(|(name, value)| name == "authorization" && value == "Bearer test")
+        );
+    }
 }

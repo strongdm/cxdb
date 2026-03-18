@@ -83,8 +83,8 @@ pub async fn run(cli: Cli) -> Result<i32> {
         .await?;
     ledger.note_child_exit(exit_code).await?;
 
-    delivery.shutdown().await?;
     proxy.shutdown().await?;
+    delivery.shutdown().await?;
     ledger.finalize().await?;
 
     Ok(exit_code)
