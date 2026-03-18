@@ -11,7 +11,8 @@ const PROVIDER_CASES = [
 async function createTaggedContext(
   serverHttpUrl: string,
   tag: string,
-  title: string
+  title: string,
+  labels: string[] = []
 ): Promise<string> {
   const createResponse = await fetch(`${serverHttpUrl}/v1/contexts`, {
     method: 'POST',
@@ -33,6 +34,7 @@ async function createTaggedContext(
         '30': {
           '1': tag,
           '2': title,
+          '3': labels,
         },
       },
     }),
@@ -85,6 +87,47 @@ test.describe('Tag Filter', () => {
       await expect(searchInput).toHaveValue(`title ^~= "${titlePrefix}" AND tag = "${tag}"`);
       await expect(apiPage.locator(`[data-context-id="${providerId}"]`)).toBeVisible();
       await expect(apiPage.locator(`[data-context-id="${dotrunnerId}"]`)).toHaveCount(0);
+    });
+
+    test(`clicking a label chip appends a CQL label clause and can compose with ${tag} tag clicks`, async ({
+      apiPage,
+      serverHttpUrl,
+    }) => {
+      const matchingId = await createTaggedContext(
+        serverHttpUrl,
+        tag,
+        `${titlePrefix} Interactive`,
+        ['interactive', 'shared']
+      );
+      const wrongLabelId = await createTaggedContext(
+        serverHttpUrl,
+        tag,
+        `${titlePrefix} Batch`,
+        ['batch']
+      );
+      const wrongTagId = await createTaggedContext(
+        serverHttpUrl,
+        'dotrunner',
+        'Dotrunner Interactive',
+        ['interactive']
+      );
+
+      await apiPage.goto('/');
+
+      const searchInput = apiPage.locator('input[placeholder*="Search"]');
+      await apiPage.locator('[data-context-label-filter="interactive"]').first().click();
+
+      await expect(searchInput).toHaveValue('label = "interactive"');
+      await expect(apiPage.locator(`[data-context-id="${matchingId}"]`)).toBeVisible();
+      await expect(apiPage.locator(`[data-context-id="${wrongTagId}"]`)).toBeVisible();
+      await expect(apiPage.locator(`[data-context-id="${wrongLabelId}"]`)).toHaveCount(0);
+
+      await apiPage.locator(`[data-context-tag-filter="${tag}"]`).first().click();
+
+      await expect(searchInput).toHaveValue(`label = "interactive" AND tag = "${tag}"`);
+      await expect(apiPage.locator(`[data-context-id="${matchingId}"]`)).toBeVisible();
+      await expect(apiPage.locator(`[data-context-id="${wrongLabelId}"]`)).toHaveCount(0);
+      await expect(apiPage.locator(`[data-context-id="${wrongTagId}"]`)).toHaveCount(0);
     });
   }
 });

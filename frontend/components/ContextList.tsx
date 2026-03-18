@@ -56,6 +56,7 @@ interface ContextListProps {
   focusedIndex?: number;
   onSelect: (contextId: string) => void;
   onTagClick?: (tag: string) => void;
+  onLabelClick?: (label: string) => void;
   lastEvent?: StoreEvent | null;
 }
 
@@ -75,6 +76,7 @@ const ContextListItem = memo(function ContextListItem({
   isUpdated,
   itemRef,
   onTagClick,
+  onLabelClick,
 }: {
   context: ContextEntry;
   isSelected: boolean;
@@ -84,6 +86,7 @@ const ContextListItem = memo(function ContextListItem({
   isUpdated?: boolean;
   itemRef?: React.RefObject<HTMLButtonElement>;
   onTagClick?: (tag: string) => void;
+  onLabelClick?: (label: string) => void;
 }) {
   const presenceState: PresenceState = useMemo(() => {
     if (context.is_live) {
@@ -113,6 +116,13 @@ const ContextListItem = memo(function ContextListItem({
     event.stopPropagation();
     onTagClick?.(context.client_tag);
   }, [context.client_tag, onTagClick]);
+  const handleLabelClick = useCallback((event: React.MouseEvent<HTMLSpanElement>) => {
+    const label = event.currentTarget.dataset.contextLabelFilter;
+    if (!label) return;
+    event.preventDefault();
+    event.stopPropagation();
+    onLabelClick?.(label);
+  }, [onLabelClick]);
 
   return (
     <button
@@ -235,7 +245,12 @@ const ContextListItem = memo(function ContextListItem({
           {context.labels.slice(0, 3).map((label) => (
             <span
               key={label}
-              className="inline-flex items-center gap-0.5 px-1 py-0.5 bg-theme-bg-tertiary/60 rounded text-[10px] text-theme-text-muted"
+              className={cn(
+                'inline-flex items-center gap-0.5 px-1 py-0.5 bg-theme-bg-tertiary/60 rounded text-[10px] text-theme-text-muted',
+                onLabelClick && 'cursor-pointer hover:bg-theme-bg-tertiary hover:text-theme-text-secondary'
+              )}
+              data-context-label-filter={label}
+              onClick={onLabelClick ? handleLabelClick : undefined}
             >
               <Tag className="w-2.5 h-2.5" />
               {label}
@@ -273,6 +288,7 @@ export function ContextList({
   focusedIndex = 0,
   onSelect,
   onTagClick,
+  onLabelClick,
   lastEvent,
 }: ContextListProps) {
   const [animationState, setAnimationState] = useState<AnimationState>({});
@@ -358,6 +374,7 @@ export function ContextList({
           isFocused={index === focusedIndex}
           onSelect={() => onSelect(context.context_id)}
           onTagClick={onTagClick}
+          onLabelClick={onLabelClick}
           isNew={animationState[context.context_id]?.isNew}
           isUpdated={animationState[context.context_id]?.isUpdated}
           itemRef={index === focusedIndex ? focusedRef as React.RefObject<HTMLButtonElement> : undefined}

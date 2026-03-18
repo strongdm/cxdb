@@ -9,7 +9,7 @@ import { ThemeSelector } from '@/components/ThemeSelector';
 import { getTagColor } from '@/lib/clientTags';
 import { cn, normalizeContextId } from '@/lib/utils';
 import { healthCheck, fetchContexts, searchContexts } from '@/lib/api';
-import { validate as validateCql, buildFallbackQuery, appendTagSearchClause, extractTagSearchClause } from '@/lib/cql';
+import { validate as validateCql, buildFallbackQuery, appendSearchCriterionClause, extractSearchCriteriaClauses } from '@/lib/cql';
 import { useEventStream, useMockEventGenerator, useUrlRouter, parseUrl, type RouteState } from '@/hooks';
 import { ConnectionStatus, ActivityFeed } from '@/components/live';
 import { ServerHealthDashboard } from '@/components/dashboard';
@@ -273,7 +273,14 @@ export default function CxdbApp() {
   }, [contexts, selectedTag, sortByTag, searchResults]);
 
   const handleTagSelect = useCallback((tag: string) => {
-    setSearchQuery(prev => appendTagSearchClause(prev, tag));
+    setSearchQuery(prev => appendSearchCriterionClause(prev, { field: 'tag', value: tag }));
+    setSelectedTag(null);
+    setTagFilterOpen(false);
+    setFocusedContextIndex(0);
+  }, []);
+
+  const handleLabelSelect = useCallback((label: string) => {
+    setSearchQuery(prev => appendSearchCriterionClause(prev, { field: 'label', value: label }));
     setSelectedTag(null);
     setTagFilterOpen(false);
     setFocusedContextIndex(0);
@@ -325,7 +332,7 @@ export default function CxdbApp() {
       }
       searchAbortRef.current = new AbortController();
 
-      const { baseQuery, tag } = extractTagSearchClause(query);
+      const { baseQuery, criteria } = extractSearchCriteriaClauses(query);
       let effectiveQuery = '';
 
       if (baseQuery) {
@@ -333,11 +340,13 @@ export default function CxdbApp() {
         effectiveQuery = validation.ok ? baseQuery : buildFallbackQuery(baseQuery);
       }
 
-      if (tag) {
-        const tagClause = `tag = "${tag.replace(/"/g, '\\"')}"`;
+      if (criteria.length > 0) {
+        const criterionClauses = criteria.map(
+          criterion => `${criterion.field} = "${criterion.value.replace(/"/g, '\\"')}"`
+        );
         effectiveQuery = effectiveQuery
-          ? `(${effectiveQuery}) AND ${tagClause}`
-          : tagClause;
+          ? `(${effectiveQuery}) AND ${criterionClauses.join(' AND ')}`
+          : criterionClauses.join(' AND ');
       }
 
       if (!effectiveQuery) {
@@ -773,6 +782,7 @@ export default function CxdbApp() {
                     focusedIndex={focusedContextIndex}
                     onSelect={handleSelectContext}
                     onTagClick={handleTagSelect}
+                    onLabelClick={handleLabelSelect}
                     lastEvent={lastEvent}
                   />
                 )}

@@ -63,48 +63,85 @@ export function formatError(error: import('./types').CqlError): string {
   return `${error.message} (line ${error.position.line}, column ${error.position.column})`;
 }
 
-const TRAILING_TAG_CLAUSE_PATTERN = /\s+AND\s+tag\s*=\s*"((?:\\"|[^"])*)"$/i;
-const EXACT_TAG_CLAUSE_PATTERN = /^tag\s*=\s*"((?:\\"|[^"])*)"$/i;
+export interface SearchCriterionClause {
+  field: 'tag' | 'label';
+  value: string;
+}
+
+const TRAILING_CRITERION_PATTERN = /\s+AND\s+(tag|label)\s*=\s*"((?:\\"|[^"])*)"$/i;
+const EXACT_CRITERION_PATTERN = /^(tag|label)\s*=\s*"((?:\\"|[^"])*)"$/i;
 
 /**
- * Split the visible search text into its base query and any appended trailing tag clause.
+ * Split the visible search text into its base query and any appended trailing search criteria.
  */
-export function extractTagSearchClause(query: string): { baseQuery: string; tag: string | null } {
+export function extractSearchCriteriaClauses(query: string): {
+  baseQuery: string;
+  criteria: SearchCriterionClause[];
+} {
   const trimmedQuery = query.trim();
-  const exactMatch = trimmedQuery.match(EXACT_TAG_CLAUSE_PATTERN);
+  const exactMatch = trimmedQuery.match(EXACT_CRITERION_PATTERN);
   if (exactMatch) {
     return {
       baseQuery: '',
-      tag: exactMatch[1].replace(/\\"/g, '"'),
+      criteria: [{
+        field: exactMatch[1].toLowerCase() as SearchCriterionClause['field'],
+        value: exactMatch[2].replace(/\\"/g, '"'),
+      }],
     };
   }
 
-  const trailingMatch = trimmedQuery.match(TRAILING_TAG_CLAUSE_PATTERN);
-  if (!trailingMatch) {
-    return { baseQuery: trimmedQuery, tag: null };
+  const criteria: SearchCriterionClause[] = [];
+  let baseQuery = trimmedQuery;
+
+  while (true) {
+    const trailingMatch = baseQuery.match(TRAILING_CRITERION_PATTERN);
+    if (!trailingMatch || trailingMatch.index === undefined) {
+      break;
+    }
+    criteria.unshift({
+      field: trailingMatch[1].toLowerCase() as SearchCriterionClause['field'],
+      value: trailingMatch[2].replace(/\\"/g, '"'),
+    });
+    baseQuery = baseQuery.slice(0, trailingMatch.index).trim();
   }
 
   return {
-    baseQuery: trimmedQuery.slice(0, trailingMatch.index).trim(),
-    tag: trailingMatch[1].replace(/\\"/g, '"'),
+    baseQuery,
+    criteria,
   };
 }
 
 /**
- * Replace any existing trailing tag clause with the clicked context tag.
+ * Append a clickable search facet to the visible query.
+ *
+ * `tag` criteria replace any prior appended `tag` criterion because contexts only
+ * have one client tag. `label` criteria accumulate so users can narrow by multiple
+ * labels from the sidebar.
  */
-export function appendTagSearchClause(query: string, tag: string): string {
-  const normalizedTag = tag.trim();
-  const escapedTag = normalizedTag.replace(/"/g, '\\"');
-  const { baseQuery } = extractTagSearchClause(query);
+export function appendSearchCriterionClause(
+  query: string,
+  criterion: SearchCriterionClause
+): string {
+  const normalizedValue = criterion.value.trim();
+  const escapedValue = normalizedValue.replace(/"/g, '\\"');
+  const { baseQuery, criteria } = extractSearchCriteriaClauses(query);
 
-  if (!normalizedTag) {
+  if (!normalizedValue) {
     return baseQuery;
   }
 
-  return baseQuery
-    ? `${baseQuery} AND tag = "${escapedTag}"`
-    : `tag = "${escapedTag}"`;
+  const nextCriteria =
+    criterion.field === 'tag'
+      ? [...criteria.filter(existing => existing.field !== 'tag'), { field: 'tag', value: normalizedValue }]
+      : criteria.some(existing => existing.field === 'label' && existing.value === normalizedValue)
+        ? criteria
+        : [...criteria, { field: 'label', value: normalizedValue }];
+
+  const renderedCriteria = nextCriteria.map(
+    existing => `${existing.field} = "${existing.value.replace(/"/g, '\\"')}"`
+  );
+
+  return [baseQuery, ...renderedCriteria].filter(Boolean).join(' AND ');
 }
 
 /**
