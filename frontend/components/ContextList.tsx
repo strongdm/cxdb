@@ -2,26 +2,12 @@
 
 import { memo, useMemo, useState, useEffect, useCallback, useRef } from 'react';
 import type { ContextEntry, StoreEvent } from '@/types';
+import { getTagColor } from '@/lib/clientTags';
 import { cn, formatTimestamp } from '@/lib/utils';
 import { Database, GitBranch, GitFork, ChevronRight, Folder, User, Tag } from './icons';
 import { PresenceIndicator, LiveTimestamp } from './live';
 import type { PresenceState } from './live';
 import { getSourceStyle } from '@/types/provenance';
-
-// Tag color mapping - uses theme-aware classes
-const TAG_COLORS: Record<string, { bg: string; text: string; border: string }> = {
-  dotrunner: { bg: 'bg-theme-tag-dotrunner-bg', text: 'text-theme-tag-dotrunner', border: 'border-theme-tag-dotrunner/30' },
-  claude: { bg: 'bg-theme-tag-claude-code-bg', text: 'text-theme-tag-claude-code', border: 'border-theme-tag-claude-code/30' },
-  'claude-code': { bg: 'bg-theme-tag-claude-code-bg', text: 'text-theme-tag-claude-code', border: 'border-theme-tag-claude-code/30' },
-  gen: { bg: 'bg-theme-tag-gen-bg', text: 'text-theme-tag-gen', border: 'border-theme-tag-gen/30' },
-  test: { bg: 'bg-theme-tag-test-bg', text: 'text-theme-tag-test', border: 'border-theme-tag-test/30' },
-};
-
-const DEFAULT_TAG_COLOR = { bg: 'bg-theme-tag-default-bg', text: 'text-theme-tag-default', border: 'border-theme-tag-default/30' };
-
-function getTagColor(tag: string) {
-  return TAG_COLORS[tag.toLowerCase()] || DEFAULT_TAG_COLOR;
-}
 
 function getContextBadgeLabel(context: ContextEntry): string | null {
   const provenance = context.provenance;

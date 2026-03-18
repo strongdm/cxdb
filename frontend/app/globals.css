@@ -79,6 +79,8 @@
   --theme-tag-dotrunner-bg: rgba(37, 99, 235, 0.2);
   --theme-tag-claude-code: #c084fc;
   --theme-tag-claude-code-bg: rgba(147, 51, 234, 0.2);
+  --theme-tag-codex: #22c55e;
+  --theme-tag-codex-bg: rgba(34, 197, 94, 0.2);
   --theme-tag-gen: #34d399;
   --theme-tag-gen-bg: rgba(16, 185, 129, 0.2);
   --theme-tag-test: #fbbf24;

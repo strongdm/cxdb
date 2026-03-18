@@ -73,6 +73,8 @@ const config: Config = {
           'tag-dotrunner-bg': 'var(--theme-tag-dotrunner-bg)',
           'tag-claude-code': 'var(--theme-tag-claude-code)',
           'tag-claude-code-bg': 'var(--theme-tag-claude-code-bg)',
+          'tag-codex': 'var(--theme-tag-codex)',
+          'tag-codex-bg': 'var(--theme-tag-codex-bg)',
           'tag-gen': 'var(--theme-tag-gen)',
           'tag-gen-bg': 'var(--theme-tag-gen-bg)',
           'tag-test': 'var(--theme-tag-test)',

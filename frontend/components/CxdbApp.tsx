@@ -6,27 +6,13 @@ import { ContextList } from '@/components/ContextList';
 import type { ContextEntry, StoreEvent } from '@/types';
 import { Database, Layers, Plus, X, AlertCircle, Check, Zap, Radio, ChevronDown, Filter } from '@/components/icons';
 import { ThemeSelector } from '@/components/ThemeSelector';
+import { getTagColor } from '@/lib/clientTags';
 import { cn, normalizeContextId } from '@/lib/utils';
 import { healthCheck, fetchContexts, searchContexts } from '@/lib/api';
 import { validate as validateCql, buildFallbackQuery, appendTagSearchClause, extractTagSearchClause } from '@/lib/cql';
 import { useEventStream, useMockEventGenerator, useUrlRouter, parseUrl, type RouteState } from '@/hooks';
 import { ConnectionStatus, ActivityFeed } from '@/components/live';
 import { ServerHealthDashboard } from '@/components/dashboard';
-
-// Predefined colors for tags - using theme-aware classes
-const TAG_COLORS: Record<string, { bg: string; text: string; border: string }> = {
-  dotrunner: { bg: 'bg-theme-tag-dotrunner-bg', text: 'text-theme-tag-dotrunner', border: 'border-theme-tag-dotrunner/30' },
-  claude: { bg: 'bg-theme-tag-claude-code-bg', text: 'text-theme-tag-claude-code', border: 'border-theme-tag-claude-code/30' },
-  'claude-code': { bg: 'bg-theme-tag-claude-code-bg', text: 'text-theme-tag-claude-code', border: 'border-theme-tag-claude-code/30' },
-  gen: { bg: 'bg-theme-tag-gen-bg', text: 'text-theme-tag-gen', border: 'border-theme-tag-gen/30' },
-  test: { bg: 'bg-theme-tag-test-bg', text: 'text-theme-tag-test', border: 'border-theme-tag-test/30' },
-};
-
-const DEFAULT_TAG_COLOR = { bg: 'bg-theme-tag-default-bg', text: 'text-theme-tag-default', border: 'border-theme-tag-default/30' };
-
-function getTagColor(tag: string) {
-  return TAG_COLORS[tag.toLowerCase()] || DEFAULT_TAG_COLOR;
-}
 
 export default function CxdbApp() {
   const [contexts, setContexts] = useState<ContextEntry[]>([]);

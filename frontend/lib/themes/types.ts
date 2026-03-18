@@ -58,6 +58,8 @@ export interface ThemeColors {
   tagDotrunnerBg: string;
   tagClaudeCode: string;
   tagClaudeCodeBg: string;
+  tagCodex: string;
+  tagCodexBg: string;
   tagGen: string;
   tagGenBg: string;
   tagTest: string;

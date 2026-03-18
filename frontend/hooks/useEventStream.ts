@@ -13,6 +13,7 @@ import type {
   ClientDisconnectedEvent,
   ErrorOccurredEvent,
 } from '@/types';
+import { MOCK_CLIENT_TAGS } from '@/lib/clientTags';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || '/v1';
 
@@ -242,7 +243,7 @@ export function useMockEventGenerator(mockEmit?: (event: StoreEvent) => void) {
 
       let contextCounter = 100;
       let turnCounter = 1000;
-      const clientTags = ['claude', 'dotrunner', 'test-harness', 'aider'];
+      const clientTags = [...MOCK_CLIENT_TAGS];
       const activeContexts: string[] = [];
 
       intervalRef.current = setInterval(() => {

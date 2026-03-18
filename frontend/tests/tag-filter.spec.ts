@@ -3,6 +3,11 @@
 
 import { test, expect } from './fixtures';
 
+const PROVIDER_CASES = [
+  { tag: 'claude', titlePrefix: 'Claude' },
+  { tag: 'codex', titlePrefix: 'Codex' },
+] as const;
+
 async function createTaggedContext(
   serverHttpUrl: string,
   tag: string,
@@ -38,46 +43,48 @@ async function createTaggedContext(
 }
 
 test.describe('Tag Filter', () => {
-  test('clicking a context tag chip appends a CQL tag clause and filters the context list', async ({
-    apiPage,
-    serverHttpUrl,
-  }) => {
-    const claudeOneId = await createTaggedContext(serverHttpUrl, 'claude', 'Claude One');
-    const dotrunnerId = await createTaggedContext(serverHttpUrl, 'dotrunner', 'Dotrunner One');
-    const claudeTwoId = await createTaggedContext(serverHttpUrl, 'claude', 'Claude Two');
+  for (const { tag, titlePrefix } of PROVIDER_CASES) {
+    test(`clicking a ${tag} context tag chip appends a CQL tag clause and filters the context list`, async ({
+      apiPage,
+      serverHttpUrl,
+    }) => {
+      const providerOneId = await createTaggedContext(serverHttpUrl, tag, `${titlePrefix} One`);
+      const dotrunnerId = await createTaggedContext(serverHttpUrl, 'dotrunner', 'Dotrunner One');
+      const providerTwoId = await createTaggedContext(serverHttpUrl, tag, `${titlePrefix} Two`);
 
-    await apiPage.goto('/');
+      await apiPage.goto('/');
 
-    await expect(apiPage.locator(`[data-context-id="${claudeOneId}"]`)).toBeVisible();
-    await expect(apiPage.locator(`[data-context-id="${dotrunnerId}"]`)).toBeVisible();
-    await expect(apiPage.locator(`[data-context-id="${claudeTwoId}"]`)).toBeVisible();
+      await expect(apiPage.locator(`[data-context-id="${providerOneId}"]`)).toBeVisible();
+      await expect(apiPage.locator(`[data-context-id="${dotrunnerId}"]`)).toBeVisible();
+      await expect(apiPage.locator(`[data-context-id="${providerTwoId}"]`)).toBeVisible();
 
-    const searchInput = apiPage.locator('input[placeholder*="Search"]');
-    await apiPage.locator('[data-context-tag-filter="claude"]').first().click();
+      const searchInput = apiPage.locator('input[placeholder*="Search"]');
+      await apiPage.locator(`[data-context-tag-filter="${tag}"]`).first().click();
 
-    await expect(searchInput).toHaveValue('tag = "claude"');
-    await expect(apiPage.getByRole('button', { name: 'All tags' })).toBeVisible();
-    await expect(apiPage.locator('[data-context-id]')).toHaveCount(2);
-    await expect(apiPage.locator(`[data-context-id="${claudeOneId}"]`)).toBeVisible();
-    await expect(apiPage.locator(`[data-context-id="${claudeTwoId}"]`)).toBeVisible();
-    await expect(apiPage.locator(`[data-context-id="${dotrunnerId}"]`)).toHaveCount(0);
-  });
+      await expect(searchInput).toHaveValue(`tag = "${tag}"`);
+      await expect(apiPage.getByRole('button', { name: 'All tags' })).toBeVisible();
+      await expect(apiPage.locator('[data-context-id]')).toHaveCount(2);
+      await expect(apiPage.locator(`[data-context-id="${providerOneId}"]`)).toBeVisible();
+      await expect(apiPage.locator(`[data-context-id="${providerTwoId}"]`)).toBeVisible();
+      await expect(apiPage.locator(`[data-context-id="${dotrunnerId}"]`)).toHaveCount(0);
+    });
 
-  test('clicking a context tag chip appends the tag clause to an existing search query', async ({
-    apiPage,
-    serverHttpUrl,
-  }) => {
-    const claudeId = await createTaggedContext(serverHttpUrl, 'claude', 'Claude Search Compose');
-    const dotrunnerId = await createTaggedContext(serverHttpUrl, 'dotrunner', 'Dotrunner Search Compose');
+    test(`clicking a ${tag} context tag chip appends the tag clause to an existing search query`, async ({
+      apiPage,
+      serverHttpUrl,
+    }) => {
+      const providerId = await createTaggedContext(serverHttpUrl, tag, `${titlePrefix} Search Compose`);
+      const dotrunnerId = await createTaggedContext(serverHttpUrl, 'dotrunner', 'Dotrunner Search Compose');
 
-    await apiPage.goto('/');
+      await apiPage.goto('/');
 
-    const searchInput = apiPage.locator('input[placeholder*="Search"]');
-    await searchInput.fill('title ^~= "Claude"');
-    await apiPage.locator('[data-context-tag-filter="claude"]').first().click();
+      const searchInput = apiPage.locator('input[placeholder*="Search"]');
+      await searchInput.fill(`title ^~= "${titlePrefix}"`);
+      await apiPage.locator(`[data-context-tag-filter="${tag}"]`).first().click();
 
-    await expect(searchInput).toHaveValue('title ^~= "Claude" AND tag = "claude"');
-    await expect(apiPage.locator(`[data-context-id="${claudeId}"]`)).toBeVisible();
-    await expect(apiPage.locator(`[data-context-id="${dotrunnerId}"]`)).toHaveCount(0);
-  });
+      await expect(searchInput).toHaveValue(`title ^~= "${titlePrefix}" AND tag = "${tag}"`);
+      await expect(apiPage.locator(`[data-context-id="${providerId}"]`)).toBeVisible();
+      await expect(apiPage.locator(`[data-context-id="${dotrunnerId}"]`)).toHaveCount(0);
+    });
+  }
 });

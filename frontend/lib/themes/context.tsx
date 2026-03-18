@@ -86,6 +86,8 @@ function applyThemeToDocument(colors: ThemeColors): void {
   root.style.setProperty('--theme-tag-dotrunner-bg', colors.tagDotrunnerBg);
   root.style.setProperty('--theme-tag-claude-code', colors.tagClaudeCode);
   root.style.setProperty('--theme-tag-claude-code-bg', colors.tagClaudeCodeBg);
+  root.style.setProperty('--theme-tag-codex', colors.tagCodex);
+  root.style.setProperty('--theme-tag-codex-bg', colors.tagCodexBg);
   root.style.setProperty('--theme-tag-gen', colors.tagGen);
   root.style.setProperty('--theme-tag-gen-bg', colors.tagGenBg);
   root.style.setProperty('--theme-tag-test', colors.tagTest);
