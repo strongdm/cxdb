@@ -21,6 +21,43 @@ export class ApiError extends Error {
   }
 }
 
+function normalizeContextEntry(context: ContextEntry): ContextEntry {
+  return {
+    ...context,
+    context_id: String(context.context_id),
+    head_turn_id: context.head_turn_id !== undefined ? String(context.head_turn_id) : undefined,
+    lineage: context.lineage ? {
+      ...context.lineage,
+      parent_context_id: context.lineage.parent_context_id !== undefined
+        ? String(context.lineage.parent_context_id)
+        : undefined,
+      root_context_id: context.lineage.root_context_id !== undefined
+        ? String(context.lineage.root_context_id)
+        : undefined,
+      child_context_ids: context.lineage.child_context_ids.map(String),
+    } : context.lineage,
+  };
+}
+
+function normalizeTurnResponse(response: TurnResponse): TurnResponse {
+  return {
+    ...response,
+    meta: {
+      ...response.meta,
+      context_id: String(response.meta.context_id),
+      head_turn_id: String(response.meta.head_turn_id),
+    },
+    next_before_turn_id: response.next_before_turn_id !== undefined
+      ? String(response.next_before_turn_id)
+      : undefined,
+    turns: response.turns.map(turn => ({
+      ...turn,
+      turn_id: String(turn.turn_id),
+      parent_turn_id: String(turn.parent_turn_id),
+    })),
+  };
+}
+
 /**
  * Fetch turns for a context from the HTTP gateway.
  */
@@ -77,7 +114,7 @@ export async function fetchTurns(
     );
   }
 
-  return response.json();
+  return normalizeTurnResponse(await response.json());
 }
 
 /**
@@ -155,7 +192,11 @@ export async function fetchContexts(limitOrOptions: number | FetchContextsOption
     );
   }
 
-  return response.json();
+  const payload = await response.json() as ContextsResponse;
+  return {
+    ...payload,
+    contexts: payload.contexts.map(normalizeContextEntry),
+  };
 }
 
 export interface FetchContextOptions {
@@ -196,7 +237,7 @@ export async function fetchContext(
     );
   }
 
-  return response.json();
+  return normalizeContextEntry(await response.json());
 }
 
 export interface FetchContextChildrenOptions {
@@ -252,7 +293,12 @@ export async function fetchContextChildren(
     );
   }
 
-  return response.json();
+  const payload = await response.json() as ContextChildrenResponse;
+  return {
+    ...payload,
+    context_id: String(payload.context_id),
+    children: payload.children.map(normalizeContextEntry),
+  };
 }
 
 /**
@@ -305,7 +351,11 @@ export async function searchContexts(
     );
   }
 
-  return response.json();
+  const payload = await response.json() as SearchResponse;
+  return {
+    ...payload,
+    contexts: payload.contexts.map(normalizeContextEntry),
+  };
 }
 
 /**
