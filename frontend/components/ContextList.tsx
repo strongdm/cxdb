@@ -11,6 +11,7 @@ import { getSourceStyle } from '@/types/provenance';
 // Tag color mapping - uses theme-aware classes
 const TAG_COLORS: Record<string, { bg: string; text: string; border: string }> = {
   dotrunner: { bg: 'bg-theme-tag-dotrunner-bg', text: 'text-theme-tag-dotrunner', border: 'border-theme-tag-dotrunner/30' },
+  claude: { bg: 'bg-theme-tag-claude-code-bg', text: 'text-theme-tag-claude-code', border: 'border-theme-tag-claude-code/30' },
   'claude-code': { bg: 'bg-theme-tag-claude-code-bg', text: 'text-theme-tag-claude-code', border: 'border-theme-tag-claude-code/30' },
   gen: { bg: 'bg-theme-tag-gen-bg', text: 'text-theme-tag-gen', border: 'border-theme-tag-gen/30' },
   test: { bg: 'bg-theme-tag-test-bg', text: 'text-theme-tag-test', border: 'border-theme-tag-test/30' },

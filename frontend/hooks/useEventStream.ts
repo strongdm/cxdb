@@ -242,7 +242,7 @@ export function useMockEventGenerator(mockEmit?: (event: StoreEvent) => void) {
 
       let contextCounter = 100;
       let turnCounter = 1000;
-      const clientTags = ['claude-code', 'dotrunner', 'test-harness', 'aider'];
+      const clientTags = ['claude', 'dotrunner', 'test-harness', 'aider'];
       const activeContexts: string[] = [];
 
       intervalRef.current = setInterval(() => {

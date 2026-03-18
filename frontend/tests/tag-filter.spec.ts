@@ -42,9 +42,9 @@ test.describe('Tag Filter', () => {
     apiPage,
     serverHttpUrl,
   }) => {
-    const claudeOneId = await createTaggedContext(serverHttpUrl, 'claude-code', 'Claude One');
+    const claudeOneId = await createTaggedContext(serverHttpUrl, 'claude', 'Claude One');
     const dotrunnerId = await createTaggedContext(serverHttpUrl, 'dotrunner', 'Dotrunner One');
-    const claudeTwoId = await createTaggedContext(serverHttpUrl, 'claude-code', 'Claude Two');
+    const claudeTwoId = await createTaggedContext(serverHttpUrl, 'claude', 'Claude Two');
 
     await apiPage.goto('/');
 
@@ -53,9 +53,9 @@ test.describe('Tag Filter', () => {
     await expect(apiPage.locator(`[data-context-id="${claudeTwoId}"]`)).toBeVisible();
 
     const searchInput = apiPage.locator('input[placeholder*="Search"]');
-    await apiPage.locator('[data-context-tag-filter="claude-code"]').first().click();
+    await apiPage.locator('[data-context-tag-filter="claude"]').first().click();
 
-    await expect(searchInput).toHaveValue('tag = "claude-code"');
+    await expect(searchInput).toHaveValue('tag = "claude"');
     await expect(apiPage.getByRole('button', { name: 'All tags' })).toBeVisible();
     await expect(apiPage.locator('[data-context-id]')).toHaveCount(2);
     await expect(apiPage.locator(`[data-context-id="${claudeOneId}"]`)).toBeVisible();
@@ -67,16 +67,16 @@ test.describe('Tag Filter', () => {
     apiPage,
     serverHttpUrl,
   }) => {
-    const claudeId = await createTaggedContext(serverHttpUrl, 'claude-code', 'Claude Search Compose');
+    const claudeId = await createTaggedContext(serverHttpUrl, 'claude', 'Claude Search Compose');
     const dotrunnerId = await createTaggedContext(serverHttpUrl, 'dotrunner', 'Dotrunner Search Compose');
 
     await apiPage.goto('/');
 
     const searchInput = apiPage.locator('input[placeholder*="Search"]');
     await searchInput.fill('title ^~= "Claude"');
-    await apiPage.locator('[data-context-tag-filter="claude-code"]').first().click();
+    await apiPage.locator('[data-context-tag-filter="claude"]').first().click();
 
-    await expect(searchInput).toHaveValue('title ^~= "Claude" AND tag = "claude-code"');
+    await expect(searchInput).toHaveValue('title ^~= "Claude" AND tag = "claude"');
     await expect(apiPage.locator(`[data-context-id="${claudeId}"]`)).toBeVisible();
     await expect(apiPage.locator(`[data-context-id="${dotrunnerId}"]`)).toHaveCount(0);
   });
