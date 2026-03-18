@@ -1,0 +1,12 @@
+.git
+.github
+.scratch
+logs
+target
+worktree
+
+**/node_modules
+**/.next
+**/out
+
+gateway/bin

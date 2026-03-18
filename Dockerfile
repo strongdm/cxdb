@@ -36,17 +36,21 @@ WORKDIR /app
 COPY Cargo.toml Cargo.lock* ./
 COPY server/Cargo.toml ./server/
 COPY clients/rust/Cargo.toml ./clients/rust/
+COPY cxtx/Cargo.toml ./cxtx/
 
 # Create dummy sources to build dependencies
-RUN mkdir -p server/src clients/rust/src && \
+RUN mkdir -p server/src clients/rust/src cxtx/src && \
     echo "fn main() {}" > server/src/main.rs && \
     echo "pub fn dummy() {}" > clients/rust/src/lib.rs && \
+    echo "pub fn dummy() {}" > cxtx/src/lib.rs && \
+    echo "fn main() {}" > cxtx/src/main.rs && \
     cargo build --release --manifest-path server/Cargo.toml && \
-    rm -rf server/src clients/rust/src
+    rm -rf server/src clients/rust/src cxtx/src
 
 # Copy actual source and build
 COPY server/ ./server/
 COPY clients/ ./clients/
+COPY cxtx/ ./cxtx/
 RUN touch server/src/main.rs && \
     cargo build --release --manifest-path server/Cargo.toml
 
