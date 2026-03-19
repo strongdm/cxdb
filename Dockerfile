@@ -74,7 +74,7 @@ RUN mkdir -p /app /data /var/log/supervisor
 # separate dist dir so `next build` doesn't clobber a live dev server's `.next`
 # artifacts.
 COPY --from=backend /app/target/release/cxdb-server /app/cxdb
-COPY --from=frontend /app/.next-build /usr/share/nginx/html
+COPY --from=frontend /app/.next-build/. /usr/share/nginx/html/
 
 # Copy nginx config
 COPY deploy/nginx.conf /etc/nginx/nginx.conf
