@@ -53,6 +53,40 @@ impl ProviderKind {
         }
     }
 
+    pub fn child_args(self, args: &[String]) -> Vec<String> {
+        self.child_args_for_proxy(args, None)
+    }
+
+    pub fn child_args_for_proxy(
+        self,
+        args: &[String],
+        _proxy_base_url: Option<&Url>,
+    ) -> Vec<String> {
+        match self {
+            Self::Codex => {
+                let mut out = Vec::new();
+                if !has_codex_config_override(args, "prefer_websockets") {
+                    out.extend(["-c".to_string(), "prefer_websockets=false".to_string()]);
+                }
+                if !has_codex_feature_override(args, "responses_websockets") {
+                    out.extend([
+                        "--disable".to_string(),
+                        "responses_websockets".to_string(),
+                    ]);
+                }
+                if !has_codex_feature_override(args, "responses_websockets_v2") {
+                    out.extend([
+                        "--disable".to_string(),
+                        "responses_websockets_v2".to_string(),
+                    ]);
+                }
+                out.extend(args.iter().cloned());
+                out
+            }
+            Self::Claude => args.to_vec(),
+        }
+    }
+
     pub fn labels(self) -> Vec<String> {
         vec![
             "cxtx".to_string(),
@@ -115,7 +149,9 @@ impl ProviderKind {
         match self {
             Self::Codex => vec![
                 ("OPENAI_BASE_URL".to_string(), value.clone()),
-                ("OPENAI_API_BASE".to_string(), value),
+                ("OPENAI_API_BASE".to_string(), value.clone()),
+                ("CXTX_OPENAI_BASE_URL".to_string(), value.clone()),
+                ("CXTX_OPENAI_API_BASE".to_string(), value),
             ],
             Self::Claude => {
                 let root = proxy_base_url.origin().unicode_serialization();
@@ -216,7 +252,7 @@ impl ProviderKind {
         }
     }
 
-    fn upstream_base_env_names(self) -> &'static [&'static str] {
+    pub fn upstream_base_env_names(self) -> &'static [&'static str] {
         match self {
             Self::Codex => &["OPENAI_BASE_URL", "OPENAI_API_BASE"],
             Self::Claude => &[
@@ -340,6 +376,36 @@ fn find_model_field(value: &Value) -> Option<String> {
     }
 }
 
+fn has_codex_config_override(args: &[String], key: &str) -> bool {
+    args.iter().enumerate().any(|(index, arg)| {
+        if let Some(value) = arg.strip_prefix("--config=") {
+            return value.trim_start().starts_with(&format!("{key}="));
+        }
+        if let Some(value) = arg.strip_prefix("-c") {
+            if !value.is_empty() {
+                return value.trim_start().starts_with(&format!("{key}="));
+            }
+        }
+        matches!(arg.as_str(), "-c" | "--config")
+            && args
+                .get(index + 1)
+                .is_some_and(|value| value.trim_start().starts_with(&format!("{key}=")))
+    })
+}
+
+fn has_codex_feature_override(args: &[String], feature: &str) -> bool {
+    args.iter().enumerate().any(|(index, arg)| {
+        if let Some(value) = arg.strip_prefix("--enable=") {
+            return value == feature;
+        }
+        if let Some(value) = arg.strip_prefix("--disable=") {
+            return value == feature;
+        }
+        matches!(arg.as_str(), "--enable" | "--disable")
+            && args.get(index + 1).is_some_and(|value| value == feature)
+    }) || has_codex_config_override(args, &format!("features.{feature}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::ProviderKind;
@@ -370,5 +436,91 @@ mod tests {
             routed.as_str(),
             "https://example.test/anthropic/v1/messages"
         );
+    }
+
+    #[test]
+    fn codex_child_args_disable_websockets_by_default() {
+        let args = vec!["exec".to_string(), "say hi".to_string()];
+        assert_eq!(
+            ProviderKind::Codex.child_args(&args),
+            vec![
+                "-c".to_string(),
+                "prefer_websockets=false".to_string(),
+                "--disable".to_string(),
+                "responses_websockets".to_string(),
+                "--disable".to_string(),
+                "responses_websockets_v2".to_string(),
+                "exec".to_string(),
+                "say hi".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn codex_child_args_preserve_explicit_prefer_websockets_override() {
+        let args = vec![
+            "--config".to_string(),
+            "prefer_websockets=true".to_string(),
+            "exec".to_string(),
+        ];
+        assert_eq!(
+            ProviderKind::Codex.child_args(&args),
+            vec![
+                "--disable".to_string(),
+                "responses_websockets".to_string(),
+                "--disable".to_string(),
+                "responses_websockets_v2".to_string(),
+                "--config".to_string(),
+                "prefer_websockets=true".to_string(),
+                "exec".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn codex_child_args_preserve_explicit_feature_overrides() {
+        let args = vec![
+            "--disable".to_string(),
+            "responses_websockets".to_string(),
+            "--enable".to_string(),
+            "responses_websockets_v2".to_string(),
+            "exec".to_string(),
+        ];
+        assert_eq!(
+            ProviderKind::Codex.child_args(&args),
+            vec![
+                "-c".to_string(),
+                "prefer_websockets=false".to_string(),
+                "--disable".to_string(),
+                "responses_websockets".to_string(),
+                "--enable".to_string(),
+                "responses_websockets_v2".to_string(),
+                "exec".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn codex_child_args_include_same_result_when_proxy_is_known() {
+        let proxy = Url::parse("http://127.0.0.1:48123/v1").unwrap();
+        let args = vec!["exec".to_string()];
+        assert_eq!(
+            ProviderKind::Codex.child_args_for_proxy(&args, Some(&proxy)),
+            vec![
+                "-c".to_string(),
+                "prefer_websockets=false".to_string(),
+                "--disable".to_string(),
+                "responses_websockets".to_string(),
+                "--disable".to_string(),
+                "responses_websockets_v2".to_string(),
+                "exec".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn claude_child_args_are_unchanged() {
+        let args = vec!["--print".to_string(), "stream".to_string()];
+        assert_eq!(ProviderKind::Claude.child_args(&args), args);
     }
 }

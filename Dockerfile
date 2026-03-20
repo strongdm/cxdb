@@ -51,7 +51,7 @@ RUN mkdir -p server/src clients/rust/src cxtx/src && \
 COPY server/ ./server/
 COPY clients/ ./clients/
 COPY cxtx/ ./cxtx/
-RUN touch server/src/main.rs && \
+RUN find server/src clients/rust/src cxtx/src -type f -exec touch {} + && \
     cargo build --release --manifest-path server/Cargo.toml
 
 # ============================================

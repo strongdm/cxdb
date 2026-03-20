@@ -19,12 +19,17 @@ use cxdb_server::http::start_http;
 use cxdb_server::metrics::{Metrics, SessionTracker};
 use cxdb_server::registry::Registry;
 use cxdb_server::store::Store;
+use futures_util::{SinkExt, StreamExt};
 use predicates::prelude::*;
 use reqwest::Client;
 use serde_json::{json, Value};
 use tempfile::TempDir;
 use tokio::net::TcpListener as TokioTcpListener;
 use tokio::sync::oneshot;
+use tokio_tungstenite::tungstenite::handshake::server::{
+    Request as WsRequest, Response as WsResponse,
+};
+use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 use cxtx::cxdb_http::CxdbHttpClient;
 use cxtx::delivery::DeliveryHandle;
@@ -114,8 +119,10 @@ async fn codex_wrapper_preserves_child_io_and_uploads_canonical_turns() {
         &format!(
             r#"#!/bin/sh
 set -eu
-printf '%s\n' "$OPENAI_BASE_URL" > "{fixture}/openai_base_url.txt"
-printf '%s\n' "$OPENAI_API_BASE" > "{fixture}/openai_api_base.txt"
+printf '%s\n' "$OPENAI_BASE_URL" > "{fixture}/openai_base_url_env.txt"
+printf '%s\n' "$OPENAI_API_BASE" > "{fixture}/openai_api_base_env.txt"
+printf '%s\n' "$CXTX_OPENAI_BASE_URL" > "{fixture}/openai_base_url.txt"
+printf '%s\n' "$CXTX_OPENAI_API_BASE" > "{fixture}/openai_api_base.txt"
 printf '%s\n' "$@" > "{fixture}/args.txt"
 python3 - <<'PY'
 import json
@@ -123,7 +130,7 @@ import os
 import sys
 import urllib.request
 
-base = os.environ["OPENAI_BASE_URL"].rstrip("/")
+base = os.environ["CXTX_OPENAI_BASE_URL"].rstrip("/")
 req = urllib.request.Request(
     base + "/chat/completions",
     data=json.dumps({{
@@ -166,10 +173,19 @@ printf 'codex-child-stderr\n' >&2
     assert!(fs::read_to_string(fixture_dir.join("openai_base_url.txt"))
         .unwrap()
         .contains("/v1"));
+    assert!(fs::read_to_string(fixture_dir.join("openai_base_url_env.txt"))
+        .unwrap()
+        .contains("/v1"));
     assert_eq!(
-        fs::read_to_string(fixture_dir.join("args.txt")).unwrap(),
-        "--model\ngpt-5\n"
+        fs::read_to_string(fixture_dir.join("openai_api_base_env.txt")).unwrap(),
+        fs::read_to_string(fixture_dir.join("openai_api_base.txt")).unwrap()
     );
+    let args = fs::read_to_string(fixture_dir.join("args.txt")).unwrap();
+    assert!(!args.contains("openai_base_url="));
+    assert!(args.starts_with("-c\nprefer_websockets=false\n"));
+    assert!(args.contains("--disable\nresponses_websockets\n"));
+    assert!(args.contains("--disable\nresponses_websockets_v2\n"));
+    assert!(args.ends_with("--model\ngpt-5\n"));
 
     let contexts = cxdb.list_contexts().await.unwrap();
     let context_id = first_context_id(&contexts);
@@ -216,7 +232,7 @@ import json
 import os
 import urllib.request
 
-base = os.environ["OPENAI_BASE_URL"].rstrip("/")
+base = os.environ["CXTX_OPENAI_BASE_URL"].rstrip("/")
 headers = {
     "Content-Type": "application/json",
     "Authorization": "Bearer test-openai",
@@ -292,7 +308,7 @@ import json
 import os
 import urllib.request
 
-base = os.environ["OPENAI_BASE_URL"].rstrip("/")
+base = os.environ["CXTX_OPENAI_BASE_URL"].rstrip("/")
 headers = {
     "Content-Type": "application/json",
     "Authorization": "Bearer test-openai",
@@ -372,7 +388,7 @@ import json
 import os
 import urllib.request
 
-base = os.environ["OPENAI_BASE_URL"].rstrip("/")
+base = os.environ["CXTX_OPENAI_BASE_URL"].rstrip("/")
 headers = {
     "Content-Type": "application/json",
     "Authorization": "Bearer test-openai",
@@ -431,6 +447,164 @@ PY
     assert_eq!(turns[2]["data"]["turn"]["tool_calls"][0]["name"], "lookup");
     assert_eq!(turns[3]["data"]["tool_result"]["content"], "lookup done");
     assert_eq!(turns[4]["data"]["turn"]["text"], "tool complete");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn codex_responses_bootstrap_history_starts_with_real_prompt() {
+    let scratch = ScratchRoot::new().unwrap();
+    let cxdb = TestCxdb::start().await.unwrap();
+    let upstream = MockOpenAi::start().await.unwrap();
+    let fake_bin_dir = scratch.dir.path().join("bin");
+    fs::create_dir_all(&fake_bin_dir).unwrap();
+    write_executable(
+        &fake_bin_dir.join("codex"),
+        r##"#!/bin/sh
+set -eu
+python3 - <<'PY'
+import json
+import os
+import sys
+import urllib.request
+
+base = os.environ["CXTX_OPENAI_BASE_URL"].rstrip("/")
+req = urllib.request.Request(
+    base + "/responses",
+    data=json.dumps({
+        "model": "gpt-5.4",
+        "input": [
+            {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "<permissions instructions>"}]},
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "# AGENTS.md instructions for /repo\n<environment_context>\n  <cwd>/repo</cwd>\n</environment_context>"}]},
+            {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "previous answer"}]},
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "real prompt"}]}
+        ]
+    }).encode(),
+    headers={
+        "Content-Type": "application/json",
+        "Authorization": "Bearer test-openai"
+    },
+)
+with urllib.request.urlopen(req) as resp:
+    sys.stdout.write(resp.read().decode())
+PY
+"##,
+    )
+    .unwrap();
+
+    let mut command = std::process::Command::cargo_bin("cxtx").unwrap();
+    command
+        .current_dir(scratch.dir.path())
+        .env("PATH", prepend_path(&fake_bin_dir))
+        .env("OPENAI_BASE_URL", upstream.base_url.as_str())
+        .arg("--url")
+        .arg(&cxdb.base_url)
+        .arg("codex")
+        .arg("--");
+    command.assert().success();
+
+    let context_id = first_context_id(&cxdb.list_contexts().await.unwrap());
+    let turns = cxdb.turns(context_id).await.unwrap();
+    let item_types = turn_item_types(&turns);
+    assert_eq!(
+        item_types,
+        vec!["system", "assistant_turn", "user_input", "assistant_turn", "system"]
+    );
+    assert_eq!(turns[1]["data"]["turn"]["text"], "previous answer");
+    assert_eq!(turns[2]["data"]["user_input"]["text"], "real prompt");
+    assert_eq!(turns[3]["data"]["turn"]["text"], "clean answer");
+
+    let recorded_requests = upstream.requests.lock().unwrap().clone();
+    assert_eq!(recorded_requests.len(), 1);
+    assert_eq!(recorded_requests[0]["path"], "/v1/responses");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn websocket_proxy_uploads_canonical_turns_into_cxdb() {
+    let scratch = ScratchRoot::new().unwrap();
+    let cxdb = TestCxdb::start().await.unwrap();
+    let upstream = MockOpenAiWebsocket::start().await.unwrap();
+    let session = SessionRuntime::new(
+        ProviderKind::Codex,
+        vec!["interactive".to_string()],
+        BTreeMap::new(),
+    )
+    .unwrap();
+    let ledger = SessionLedgerWriter::create(&session).await.unwrap();
+    let proxy = cxtx::proxy::ProxyServer::start(
+        ProviderKind::Codex,
+        upstream.base_url.parse().unwrap(),
+        session.clone(),
+        ledger.clone(),
+    )
+    .await
+    .unwrap();
+    let delivery = DeliveryHandle::start(
+        cxdb.base_url.parse().unwrap(),
+        session.clone(),
+        ledger.clone(),
+        "cxtx-tests".to_string(),
+    )
+    .await
+    .unwrap();
+    proxy.set_delivery(delivery.clone()).await;
+    delivery.enqueue_create_context().await.unwrap();
+    delivery.enqueue_turn(session.session_start_turn()).await.unwrap();
+
+    let mut proxy_url = proxy.proxy_base_url();
+    proxy_url.set_scheme("ws").unwrap();
+    proxy_url.set_path("/v1/responses");
+
+    let (mut socket, _) = tokio_tungstenite::connect_async(proxy_url.as_str())
+        .await
+        .unwrap();
+    socket
+        .send(WsMessage::Text(
+            r#"{
+                "type":"response.create",
+                "model":"gpt-5.4",
+                "input":[
+                    {"type":"message","role":"developer","content":[{"type":"input_text","text":"mode"}]},
+                    {"type":"message","role":"user","content":[{"type":"input_text","text":"websocket hello"}]}
+                ]
+            }"#
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+
+    while let Some(message) = socket.next().await {
+        let message = message.unwrap();
+        match message {
+            WsMessage::Text(text) if text.contains("\"response.completed\"") => break,
+            WsMessage::Close(_) => break,
+            _ => {}
+        }
+    }
+    let _ = socket.close(None).await;
+
+    delivery
+        .enqueue_turn(session.session_end_turn(0, true))
+        .await
+        .unwrap();
+    proxy.shutdown().await.unwrap();
+    delivery.shutdown().await.unwrap();
+    ledger.finalize().await.unwrap();
+
+    let context_id = first_context_id(&cxdb.list_contexts().await.unwrap());
+    let turns = cxdb.turns(context_id).await.unwrap();
+    let item_types = turn_item_types(&turns);
+    assert_eq!(
+        item_types,
+        vec!["system", "user_input", "assistant_turn", "system"]
+    );
+    assert_eq!(turns[1]["data"]["user_input"]["text"], "websocket hello");
+    assert_eq!(turns[2]["data"]["turn"]["text"], "hello from websocket");
+
+    let ledger_json = find_single_ledger(scratch.dir.path());
+    assert_eq!(ledger_json["exchanges"][0]["status_code"], 101);
+    assert!(ledger_json["exchanges"][0]["stream_path"]
+        .as_str()
+        .unwrap()
+        .ends_with("stream.ndjson"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -787,7 +961,7 @@ import sys
 import urllib.error
 import urllib.request
 
-base = os.environ["OPENAI_BASE_URL"].rstrip("/")
+base = os.environ["CXTX_OPENAI_BASE_URL"].rstrip("/")
 req = urllib.request.Request(
     base + "/chat/completions",
     data=json.dumps({
@@ -848,7 +1022,7 @@ import os
 import sys
 import urllib.request
 
-base = os.environ["OPENAI_BASE_URL"].rstrip("/")
+base = os.environ["CXTX_OPENAI_BASE_URL"].rstrip("/")
 req = urllib.request.Request(
     base + "/chat/completions",
     data=json.dumps({
@@ -1320,6 +1494,7 @@ impl MockOpenAi {
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let app = Router::new()
             .route("/v1/chat/completions", post(mock_openai_handler))
+            .route("/v1/responses", post(mock_openai_responses_handler))
             .with_state(requests.clone());
         tokio::spawn(async move {
             let _ = axum::serve(listener, app)
@@ -1331,6 +1506,64 @@ impl MockOpenAi {
         Ok(Self {
             base_url: format!("http://{addr}/v1"),
             requests,
+            _shutdown: shutdown_tx,
+        })
+    }
+}
+
+struct MockOpenAiWebsocket {
+    base_url: String,
+    _shutdown: oneshot::Sender<()>,
+}
+
+impl MockOpenAiWebsocket {
+    async fn start() -> anyhow::Result<Self> {
+        let listener = TokioTcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = async {
+                    let (socket, _) = listener.accept().await.unwrap();
+                    let callback = |_: &WsRequest, response: WsResponse| Ok(response);
+                    let mut socket = tokio_tungstenite::accept_hdr_async(socket, callback)
+                        .await
+                        .unwrap();
+                    let _request = socket.next().await.unwrap().unwrap();
+                    socket
+                        .send(WsMessage::Text(
+                            r#"{"type":"response.output_text.delta","delta":"hello from websocket"}"#
+                                .to_string(),
+                        ))
+                        .await
+                        .unwrap();
+                    socket
+                        .send(WsMessage::Text(
+                            r#"{
+                                "type":"response.completed",
+                                "response":{
+                                    "model":"gpt-5.4",
+                                    "status":"completed",
+                                    "output":[
+                                        {
+                                            "type":"message",
+                                            "role":"assistant",
+                                            "content":[{"type":"output_text","text":"hello from websocket"}]
+                                        }
+                                    ]
+                                }
+                            }"#
+                            .to_string(),
+                        ))
+                        .await
+                        .unwrap();
+                    let _ = socket.close(None).await;
+                } => {}
+                _ = &mut shutdown_rx => {}
+            }
+        });
+        Ok(Self {
+            base_url: format!("ws://{addr}/v1"),
             _shutdown: shutdown_tx,
         })
     }
@@ -1600,6 +1833,46 @@ async fn mock_openai_handler(
                 "id": "chatcmpl_123",
                 "model": "gpt-5",
                 "choices": [{"message": {"role": "assistant", "content": response_text}}]
+            })
+            .to_string(),
+        ),
+    )
+}
+
+async fn mock_openai_responses_handler(
+    State(requests): State<Arc<Mutex<Vec<Value>>>>,
+    request: axum::http::Request<Body>,
+) -> impl IntoResponse {
+    let (parts, body) = request.into_parts();
+    let body = axum::body::to_bytes(body, usize::MAX).await.unwrap();
+    let json_body: Value = serde_json::from_slice(&body).unwrap();
+    requests.lock().unwrap().push(json!({
+        "path": parts.uri.path(),
+        "body": json_body.clone(),
+    }));
+
+    let response_text = match openai_input_last_user_text(&json_body) {
+        Some("real prompt") => "clean answer",
+        Some("websocket hello") => "hello from websocket",
+        _ => "hi",
+    };
+
+    (
+        StatusCode::OK,
+        [
+            ("content-type", "application/json"),
+            ("x-request-id", "req_openai_responses_123"),
+        ],
+        Body::from(
+            json!({
+                "id": "resp_123",
+                "model": "gpt-5.4",
+                "status": "completed",
+                "output": [{
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": response_text}]
+                }]
             })
             .to_string(),
         ),
@@ -1877,6 +2150,20 @@ fn turn_item_types(turns: &[Value]) -> Vec<&str> {
                 .unwrap_or_else(|| panic!("missing item_type in typed turn: {turn}"))
         })
         .collect()
+}
+
+fn openai_input_last_user_text(payload: &Value) -> Option<&str> {
+    payload["input"]
+        .as_array()
+        .and_then(|items| {
+            items.iter().rev().find_map(|item| {
+                (item["role"] == "user")
+                    .then_some(item["content"].as_array())
+                    .flatten()
+                    .and_then(|content| content.last())
+                    .and_then(|part| part["text"].as_str())
+            })
+        })
 }
 
 fn first_context_id(contexts: &Value) -> u64 {

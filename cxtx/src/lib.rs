@@ -19,22 +19,33 @@ use tokio::process::Command;
 
 pub async fn run(cli: Cli) -> Result<i32> {
     let provider = cli.command.provider();
-    let args = cli.command.args().to_vec();
+    let effective_url = cli.effective_url();
     let cxdb_url = cli
-        .url
+        .effective_url()
         .parse()
-        .with_context(|| format!("invalid CXDB URL: {}", cli.url))?;
+        .with_context(|| format!("invalid CXDB URL: {effective_url}"))?;
 
     let upstream = provider
         .resolve_upstream_base()
         .context("failed to resolve provider upstream base URL")?;
+    let (listener, proxy_base_url) = ProxyServer::bind(provider, &upstream)
+        .await
+        .context("failed to reserve local reverse proxy listener")?;
+    let args = provider.child_args_for_proxy(cli.command.args(), Some(&proxy_base_url));
     let allowlisted_env = provider.capture_env_allowlist();
     let session = SessionRuntime::new(provider, args.clone(), allowlisted_env)?;
     let ledger = SessionLedgerWriter::create(&session).await?;
 
-    let proxy = ProxyServer::start(provider, upstream, session.clone(), ledger.clone())
-        .await
-        .context("failed to start local reverse proxy")?;
+    let proxy = ProxyServer::start_with_listener(
+        provider,
+        upstream,
+        session.clone(),
+        ledger.clone(),
+        listener,
+        proxy_base_url.clone(),
+    )
+    .await
+    .context("failed to start local reverse proxy")?;
     let delivery = DeliveryHandle::start(
         cxdb_url,
         session.clone(),
@@ -49,7 +60,10 @@ pub async fn run(cli: Cli) -> Result<i32> {
     command.stdin(Stdio::inherit());
     command.stdout(Stdio::inherit());
     command.stderr(Stdio::inherit());
-    command.envs(provider.injected_env(&proxy.proxy_base_url()));
+    for name in provider.upstream_base_env_names() {
+        command.env_remove(name);
+    }
+    command.envs(provider.injected_env(&proxy_base_url));
 
     let mut child = match command.spawn() {
         Ok(child) => child,

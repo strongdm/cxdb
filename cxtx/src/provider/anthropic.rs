@@ -355,7 +355,12 @@ fn parse_user_blocks(content: &Value) -> Result<Vec<HistoryItem>, String> {
         Value::Array(blocks) => {
             let mut history = Vec::new();
             let mut text_buffer = String::new();
-            for block in blocks {
+            let content_start = blocks
+                .iter()
+                .enumerate()
+                .find_map(|(index, block)| (!is_bootstrap_user_block(block)).then_some(index))
+                .unwrap_or(blocks.len());
+            for block in blocks.iter().skip(content_start) {
                 match block.get("type").and_then(Value::as_str) {
                     Some("text") => {
                         let text = block
@@ -404,6 +409,23 @@ fn parse_user_blocks(content: &Value) -> Result<Vec<HistoryItem>, String> {
         }
         _ => Ok(Vec::new()),
     }
+}
+
+fn is_bootstrap_user_block(block: &Value) -> bool {
+    if block.get("type").and_then(Value::as_str) != Some("text") {
+        return false;
+    }
+
+    let text = block
+        .get("text")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim_start();
+
+    text.starts_with("<system-reminder>")
+        && (text.contains("SessionStart hook additional context")
+            || text.contains("The following skills are available for use with the Skill tool:")
+            || text.contains("As you answer the user's questions, you can use the following context:"))
 }
 
 fn parse_assistant_content(
@@ -540,6 +562,22 @@ mod tests {
                 }),
                 expected_kinds: vec!["user_input", "assistant_turn"],
             },
+            Case {
+                name: "leading bootstrap reminders are skipped before the real prompt",
+                payload: json!({
+                    "model": "claude-sonnet",
+                    "messages": [
+                        {"role": "user", "content": [
+                            {"type": "text", "text": "<system-reminder>\nSessionStart hook additional context: ..."},
+                            {"type": "text", "text": "<system-reminder>\nThe following skills are available for use with the Skill tool:\n..."},
+                            {"type": "text", "text": "<system-reminder>\nAs you answer the user's questions, you can use the following context:\n..."},
+                            {"type": "text", "text": "real prompt"}
+                        ]},
+                        {"role": "assistant", "content": [{"type": "text", "text": "done"}]}
+                    ]
+                }),
+                expected_kinds: vec!["user_input", "assistant_turn"],
+            },
         ];
 
         for case in cases {
@@ -553,6 +591,12 @@ mod tests {
                 })
                 .collect::<Vec<_>>();
             assert_eq!(kinds, case.expected_kinds, "case {}", case.name);
+            if case.name == "leading bootstrap reminders are skipped before the real prompt" {
+                match &history[0] {
+                    HistoryItem::UserInput { text, .. } => assert_eq!(text, "real prompt"),
+                    other => panic!("expected user input, got {other:?}"),
+                }
+            }
         }
     }
 

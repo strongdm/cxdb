@@ -349,8 +349,19 @@ fn parse_message_history(
 }
 
 fn parse_input_history(input: &[Value], model: Option<String>) -> Result<Vec<HistoryItem>, String> {
+    let start_index = input
+        .iter()
+        .rposition(|item| item.get("role").and_then(Value::as_str) == Some("developer"))
+        .map(|index| index + 1)
+        .unwrap_or(0);
+    let conversation_start = input
+        .iter()
+        .enumerate()
+        .skip(start_index)
+        .find_map(|(index, item)| (!is_bootstrap_input_item(item)).then_some(index))
+        .unwrap_or(input.len());
     let mut history = Vec::new();
-    for item in input {
+    for item in input.iter().skip(conversation_start) {
         if item
             .get("type")
             .and_then(Value::as_str)
@@ -388,6 +399,23 @@ fn parse_input_history(input: &[Value], model: Option<String>) -> Result<Vec<His
         }
     }
     Ok(history)
+}
+
+fn is_bootstrap_input_item(item: &Value) -> bool {
+    if item.get("type").and_then(Value::as_str) != Some("message") {
+        return false;
+    }
+    if item.get("role").and_then(Value::as_str) != Some("user") {
+        return false;
+    }
+
+    let text = content_to_text(item.get("content").unwrap_or(&Value::Null));
+    let trimmed = text.trim_start();
+    trimmed.starts_with("# AGENTS.md instructions for ")
+        || trimmed.starts_with("<permissions instructions>")
+        || trimmed.starts_with("<collaboration_mode>")
+        || trimmed.starts_with("<skills_instructions>")
+        || trimmed.starts_with("<environment_context>")
 }
 
 fn parse_assistant_payload(payload: &Value, fallback_model: Option<&str>) -> Result<Option<HistoryItem>, String> {
@@ -707,6 +735,32 @@ mod tests {
                     ]
                 }),
                 expected_kinds: vec!["user_input", "assistant_turn"],
+            },
+            Case {
+                name: "responses api input skips bootstrap conversation before latest developer block",
+                payload: json!({
+                    "model": "gpt-5.4",
+                    "input": [
+                        {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "sandbox"}]},
+                        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "AGENTS bootstrap"}]},
+                        {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "current mode"}]},
+                        {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "previous answer"}]},
+                        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "real prompt"}]}
+                    ]
+                }),
+                expected_kinds: vec!["assistant_turn", "user_input"],
+            },
+            Case {
+                name: "responses api input skips leading agents bootstrap user block after developer message",
+                payload: json!({
+                    "model": "gpt-5.4",
+                    "input": [
+                        {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "<permissions instructions>"}]},
+                        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "# AGENTS.md instructions for /repo\n<environment_context>\n  <cwd>/repo</cwd>\n</environment_context>"}]},
+                        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "real prompt"}]}
+                    ]
+                }),
+                expected_kinds: vec!["user_input"],
             },
         ];
 

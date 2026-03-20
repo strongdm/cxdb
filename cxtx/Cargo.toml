@@ -8,7 +8,7 @@ description = "CLI wrapper that captures claude/codex provider traffic and uploa
 [dependencies]
 anyhow = "1.0"
 async-stream = "0.3"
-axum = { version = "0.7", features = ["macros"] }
+axum = { version = "0.7", features = ["macros", "ws"] }
 base64 = "0.22"
 bytes = "1.10"
 chrono = { version = "0.4", features = ["clock", "serde"] }
@@ -20,6 +20,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 url = "2.5"
 uuid = { version = "1.18", features = ["v4"] }
 
