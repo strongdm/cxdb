@@ -513,6 +513,94 @@ fn array_shorthand_ref_recursively_projects() {
     );
 }
 
+#[test]
+fn nested_event_blobs_field_projects_in_typed_view() {
+    let dir = tempdir().expect("tempdir");
+    let mut registry = Registry::open(dir.path()).expect("open registry");
+
+    let bundle = r#"
+    {
+      "registry_version": 1,
+      "bundle_id": "conversation-event-blobs-test",
+      "types": {
+        "cxdb.ConversationItem": {
+          "versions": {
+            "3": {
+              "fields": {
+                "1": { "name": "item_type", "type": "string" },
+                "11": { "name": "turn", "type": "ref", "ref": "cxdb.AssistantTurn", "optional": true }
+              }
+            }
+          }
+        },
+        "cxdb.AssistantTurn": {
+          "versions": {
+            "1": {
+              "fields": {
+                "1": { "name": "text", "type": "string" },
+                "11": { "name": "event_blobs", "type": "map", "optional": true }
+              }
+            }
+          }
+        }
+      },
+      "enums": {}
+    }
+    "#;
+
+    registry
+        .put_bundle("conversation-event-blobs-test", bundle.as_bytes())
+        .expect("put bundle");
+    let desc = registry
+        .get_type_version("cxdb.ConversationItem", 3)
+        .expect("descriptor");
+
+    let event_blobs = vec![(
+        Value::String("request".into()),
+        Value::Array(vec![
+            Value::Binary(vec![0xAA, 0xBB, 0xCC]),
+            Value::Binary(vec![0x01, 0x02, 0x03]),
+        ]),
+    )];
+    let turn_map = vec![
+        (Value::Integer(1.into()), Value::String("done".into())),
+        (Value::Integer(11.into()), Value::Map(event_blobs)),
+    ];
+    let root_map = vec![
+        (
+            Value::Integer(1.into()),
+            Value::String("assistant_turn".into()),
+        ),
+        (Value::Integer(11.into()), Value::Map(turn_map)),
+    ];
+    let value = Value::Map(root_map);
+
+    let mut buf = Vec::new();
+    rmpv::encode::write_value(&mut buf, &value).expect("encode msgpack");
+
+    let projection = project_msgpack(&buf, desc, &registry, &default_options()).expect("project");
+    let data = projection.data.as_object().expect("data object");
+    let turn = data
+        .get("turn")
+        .expect("turn field present")
+        .as_object()
+        .expect("turn is object");
+    let event_blobs = turn
+        .get("event_blobs")
+        .expect("event_blobs field present")
+        .as_object()
+        .expect("event_blobs is object");
+    let request = event_blobs
+        .get("request")
+        .expect("request key present")
+        .as_array()
+        .expect("request is array");
+
+    assert_eq!(request.len(), 2);
+    assert_eq!(request[0].as_str().unwrap(), "qrvM");
+    assert_eq!(request[1].as_str().unwrap(), "AQID");
+}
+
 // ---------------------------------------------------------------------------
 // Tests for include_unknown propagation into nested types
 // ---------------------------------------------------------------------------

@@ -84,31 +84,7 @@ EOF
 echo "  Created: log-entry-bundle.json"
 
 # ConversationItem type bundle
-cat > "$FIXTURES_DIR/registry/conversation-bundle.json" <<'EOF'
-{
-  "types": [
-    {
-      "type_id": "cxdb.ConversationItem",
-      "type_version": 3,
-      "description": "Canonical conversation turn with role, content, and tool calls",
-      "fields": [
-        {"tag": 1, "name": "role", "type": "string", "semantic": "enum", "required": true},
-        {"tag": 2, "name": "content", "type": "string", "required": false},
-        {"tag": 3, "name": "tool_calls", "type": "array", "required": false},
-        {"tag": 4, "name": "timestamp", "type": "uint64", "semantic": "unix_ms", "required": true}
-      ]
-    }
-  ],
-  "renderers": [
-    {
-      "type_id": "cxdb.ConversationItem",
-      "type_version": 3,
-      "url": "https://your-cdn.com/conversation-renderer.js",
-      "integrity": ""
-    }
-  ]
-}
-EOF
+cp "$ROOT_DIR/cxtx/src/conversation_registry_bundle.json" "$FIXTURES_DIR/registry/conversation-bundle.json"
 
 echo "  Created: conversation-bundle.json"
 
