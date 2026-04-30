@@ -72,7 +72,7 @@ impl CxdbHttpClient {
 
     /// Uniform request builder — every outbound call MUST go through
     /// this method so `inject_context` is applied exactly once before
-    /// `.send()`. Sprint 018 Phase 3.2 invariant.
+    /// `.send()`. Phase 3.2 invariant.
     fn request(&self, method: Method, url: Url) -> reqwest::RequestBuilder {
         let rb = self
             .client
@@ -87,9 +87,9 @@ impl CxdbHttpClient {
 
     /// Variant that injects from an explicit `Context` rather than
     /// relying on thread-local `Context::current()`. Used by the async
-    /// delivery worker in Sprint 018 Phase 3.3 — that worker captures
-    /// the caller's context at enqueue time and threads it through
-    /// every retry without attaching it (attach + await is not Send-safe).
+    /// delivery worker — that worker captures the caller's context
+    /// at enqueue time and threads it through every retry without
+    /// attaching it (attach + await is not Send-safe).
     fn request_with_context(
         &self,
         method: Method,
@@ -614,7 +614,7 @@ fn context_metadata_payload(value: &ContextMetadata) -> Value {
     if !value.custom.is_empty() {
         obj.insert("custom".to_string(), json!(value.custom));
     }
-    // Sprint 021: tenant is emitted only when present. Missing-tenant
+    // Tenant: tenant is emitted only when present. Missing-tenant
     // rule (Decision #1): no sentinel, no empty string — the key is
     // omitted entirely when `tenant` is `None`.
     if let Some(tenant) = value.tenant.as_deref() {
@@ -780,7 +780,7 @@ mod tests {
         }
     }
 
-    /// Sprint 021 P1-T5 (happy): tenant appears in the serialized HTTP
+    /// P1-T5 (happy): tenant appears in the serialized HTTP
     /// JSON body when present.
     #[test]
     fn context_metadata_payload_includes_tenant_when_set() {
@@ -794,7 +794,7 @@ mod tests {
         );
     }
 
-    /// Sprint 021 P1-T5 (absent): tenant is OMITTED from the JSON body
+    /// P1-T5 (absent): tenant is OMITTED from the JSON body
     /// when `None` — no sentinel, no empty string.
     #[test]
     fn context_metadata_payload_omits_tenant_when_none() {

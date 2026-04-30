@@ -154,7 +154,7 @@ pub fn context_metadata(
         ],
     );
 
-    // Sprint 021 (Decision #10): read `CXTX_TENANT` exactly once at
+    // Decision: read `CXTX_TENANT` exactly once at
     // session construction. Empty string → None (no sentinel, no
     // empty-string stamp). Unset also → None.
     let tenant = std::env::var("CXTX_TENANT").ok().filter(|s| !s.is_empty());
@@ -461,7 +461,7 @@ mod tests {
         }
     }
 
-    /// Sprint 021 P1-T4 (happy): a non-empty `CXTX_TENANT` threads into
+    /// P1-T4 (happy): a non-empty `CXTX_TENANT` threads into
     /// `ContextMetadata.tenant`.
     #[test]
     fn cxtx_tenant_env_read_populates_metadata_when_set() {
@@ -476,7 +476,7 @@ mod tests {
         std::env::remove_var("CXTX_TENANT");
     }
 
-    /// Sprint 021 P1-T4 (absent): unset `CXTX_TENANT` yields `tenant = None`.
+    /// P1-T4 (absent): unset `CXTX_TENANT` yields `tenant = None`.
     #[test]
     fn cxtx_tenant_env_read_yields_none_when_unset() {
         let _guard = env_lock();
@@ -489,7 +489,7 @@ mod tests {
         assert_eq!(meta.tenant, None);
     }
 
-    /// Sprint 021 P1-T4 (empty): empty string is treated identically to
+    /// P1-T4 (empty): empty string is treated identically to
     /// unset — no sentinel, no empty-string stamp.
     #[test]
     fn cxtx_tenant_env_read_yields_none_when_empty() {

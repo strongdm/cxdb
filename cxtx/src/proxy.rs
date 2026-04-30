@@ -1001,7 +1001,7 @@ impl WebsocketCapture {
             .with("gen_ai.response.model", request_model)
             .with("app.client_tag", session.provider().client_tag())
             .with("reason", "not_reported");
-        // Sprint 021: WS breadcrumb threads `app.tenant` from the
+        // Tenant: WS breadcrumb threads `app.tenant` from the
         // session's `ContextMetadata` when present. Missing tenant
         // (`None` or empty) means no attribute — no sentinel, no empty
         // string.

@@ -1,9 +1,9 @@
 //! Typed provider-usage parse state shared by the Anthropic and OpenAI
 //! finalize paths.
 //!
-//! Sprint 016 scope: parse the `usage` object (and its cousins) into a
+//! Scope: parse the `usage` object (and its cousins) into a
 //! structurally faithful, provider-neutral shape, AND record the
-//! parse-status outcome so Sprint 017 can distinguish happy-path from
+//! parse-status outcome so OTEL emit can distinguish happy-path from
 //! `not_reported` / `error` without re-parsing raw payloads.
 
 use serde::{Deserialize, Serialize};
@@ -28,13 +28,13 @@ pub struct RawUsage {
     pub cache_creation_1h: u64,
     /// Raw finish-reason strings in provider-native shape; multi-choice
     /// responses (OpenAI `n>1`) preserve one entry per choice in
-    /// `choices[].index` order. Sprint 017 maps these to the canonical
+    /// `choices[].index` order. These map to the canonical
     /// set.
     pub finish_reasons_raw: Vec<String>,
 }
 
 /// Classifier for the `UsageOutcome::Error` variant. `Debug` output
-/// becomes the Sprint 017 span tag / metric `reason` / `error.type`
+/// becomes the span tag / metric `reason` / `error.type`
 /// value (per the sprint brief, Error → `format!("error:{class:?}")`),
 /// so variant names are effectively the contract surface.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,7 +55,7 @@ pub enum UsageOutcome {
     Reported(RawUsage),
     /// Stream / response terminated cleanly but reported no usage object
     /// (e.g., OpenAI ChatCompletions SSE without `stream_options.include_usage`).
-    /// `partial` retains whatever finish reasons were visible for Sprint 017.
+    /// `partial` retains whatever finish reasons were visible for the OTEL pipeline.
     NotReported { partial: RawUsage },
     /// Upstream error, aborted stream, malformed JSON, etc. `detail`
     /// carries a free-form operator-facing message.

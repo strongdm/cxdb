@@ -3,7 +3,7 @@
 These fixtures exercise the `UsageOutcome` parser in `cxtx/src/provider/usage.rs`
 and the usage-extraction paths in `cxtx/src/provider/{anthropic,openai}.rs`.
 Each subdirectory under `usage/` represents one row of the 16-cell provider
-matrix documented in Sprint 016.
+provider matrix.
 
 ## Layout
 

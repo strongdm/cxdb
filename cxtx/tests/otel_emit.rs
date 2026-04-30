@@ -1,4 +1,4 @@
-//! Phase 2 emit-pipeline tests for Sprint 017.
+//! Tests for cxtx OTEL emit pipeline.
 //!
 //! These tests install the global OTEL tracer + meter providers against
 //! in-memory exporters, invoke `cxtx::otel::llm_call::finalize_llm_call`
@@ -441,7 +441,7 @@ async fn p2_t6_response_model_fallback() {
 
 /// P3-T1: replay dedup regression — feeding the same semantic assistant
 /// turn twice via `SessionRuntime` with DIFFERENT `CallContext.t_start`
-/// values dedups to ONE stored turn. Sprint 017 design decision #1: the
+/// values dedups to ONE stored turn. Design decision #1: the
 /// CallContext is not part of `HistoryItem` and therefore plays no role
 /// in replay normalization.
 #[tokio::test(flavor = "multi_thread")]
@@ -855,10 +855,10 @@ async fn p2_t7_cardinality_view_drops_pii_and_version() {
 
 
 // ---------------------------------------------------------------------------
-// Sprint 021 — `app.tenant` on cxtx emit sites
+// — `app.tenant` on cxtx emit sites
 // ---------------------------------------------------------------------------
 
-/// Sprint 021 P4-T1: when `AppAttribution.tenant` is `Some(...)`,
+/// P4-T1: when `AppAttribution.tenant` is `Some(...)`,
 /// `finalize_llm_call` stamps `app.tenant` on the `chat <model>` span
 /// AND on every `gen_ai.*` metric datapoint.
 #[tokio::test(flavor = "multi_thread")]
@@ -915,7 +915,7 @@ async fn tenant_stamped_on_span_and_metrics() {
     }
 }
 
-/// Sprint 021 P4-T2: when `AppAttribution.tenant` is `None`, the
+/// P4-T2: when `AppAttribution.tenant` is `None`, the
 /// attribute is OMITTED from span + all metrics.
 #[tokio::test(flavor = "multi_thread")]
 async fn tenant_omitted_when_none() {
@@ -964,7 +964,7 @@ async fn tenant_omitted_when_none() {
     }
 }
 
-/// Sprint 021: empty-string tenant at the metadata layer flows through
+/// Tenant: empty-string tenant at the metadata layer flows through
 /// the flattening seam as `None`, so emit sites see None and omit.
 #[tokio::test(flavor = "multi_thread")]
 async fn tenant_empty_metadata_string_stays_absent_on_span() {
@@ -1006,7 +1006,7 @@ async fn tenant_empty_metadata_string_stays_absent_on_span() {
     assert!(attr_value(span, "app.tenant").is_none());
 }
 
-/// Sprint 021 P4-T3: the WebSocket `finalize_pending` breadcrumb stamps
+/// P4-T3: the WebSocket `finalize_pending` breadcrumb stamps
 /// `app.tenant` when the SessionRuntime's ContextMetadata carries a
 /// tenant (CXTX_TENANT env var is the standard ingress). When tenant
 /// is absent, the breadcrumb omits the attribute.

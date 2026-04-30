@@ -310,7 +310,7 @@ fn common_prefix_len(left: &[HistoryItem], right: &[HistoryItem]) -> usize {
 }
 
 fn normalize_history_item(item: &HistoryItem) -> HistoryItem {
-    // Sprint 017 invariant: the per-exchange OTEL `CallContext` is NOT
+    // Invariant: the per-exchange OTEL `CallContext` is NOT
     // part of `HistoryItem` and therefore does NOT participate in this
     // normalization. Two turns with different `CallContext.t_start` but
     // identical semantic conversation content MUST dedup to one stored
@@ -335,7 +335,7 @@ fn normalize_history_item(item: &HistoryItem) -> HistoryItem {
 }
 
 /// Smoke helper used by tests to lock in the invariant that the
-/// normalization function strips every field Sprint 017 adds to the
+/// normalization function strips every field OTEL emit adds to the
 /// per-exchange telemetry surface. Deliberately test-only — production
 /// paths should call `normalize_history_item` directly.
 #[cfg(test)]
@@ -343,7 +343,7 @@ pub(crate) fn assert_dedup_ignores_telemetry(item: &HistoryItem) {
     _assert_dedup_ignores_telemetry(item)
 }
 
-/// Sprint 018 P3.5: public test hook asserting that adding
+/// P3.5: public test hook asserting that adding
 /// queue-side `parent_context` / `retry.count` / `CallContext` state
 /// to the delivery pipeline does NOT change replay normalization. The
 /// field list lives entirely outside `HistoryItem`, so this function
@@ -355,7 +355,7 @@ pub(crate) fn assert_dedup_ignores_telemetry(item: &HistoryItem) {
 pub(crate) fn assert_queue_context_ignored_in_replay_hash(item: &HistoryItem) {
     // Queue-side fields (parent_context, retry.count, CallContext)
     // never appear inside HistoryItem; the only thing to verify is
-    // that the normalizer still strips the Sprint 017 telemetry
+    // that the normalizer still strips the telemetry
     // surface (which was the foothold the queue-side fields could
     // have leaked through).
     _assert_dedup_ignores_telemetry(item);
@@ -507,7 +507,7 @@ mod tests {
         assert_eq!(replay[0].item.item_type, "tool_result");
     }
 
-    /// Sprint 018 P3.5 / P3-T5: replay dedup is unaffected by the
+    /// P3.5 / P3-T5: replay dedup is unaffected by the
     /// queue-side OTEL context additions. Same semantic assistant
     /// turn observed twice (first stamped with a fresh turn, then
     /// replayed identically) must dedup to ONE turn — not two —
@@ -588,7 +588,7 @@ mod tests {
     }
 
     /// P3.4: explicit assertion that the normalization helper strips
-    /// the telemetry surface Sprint 017 adds. Run against a fully-
+    /// the telemetry surface OTEL emit adds. Run against a fully-
     /// populated assistant turn that would otherwise leak into the
     /// dedup hash.
     #[test]
@@ -672,7 +672,7 @@ mod tests {
         );
     }
 
-    /// Sprint 021 P4.4: replay dedup is unaffected by the new
+    /// P4.4: replay dedup is unaffected by the new
     /// `ContextMetadata.tenant` field. Tenant lives on
     /// `ContextMetadata` (stamped on the FIRST turn only) and is NOT a
     /// participant in `HistoryItem` equality.

@@ -97,7 +97,7 @@ pub fn finalize_llm_call(
     if let Some(user) = ctx.attribution.user.as_deref() {
         span.set_attribute(KeyValue::new("app.user", user.to_string()));
     }
-    // Sprint 021 (Decision #1): `app.tenant` stamped on the span when
+    // Decision: `app.tenant` stamped on the span when
     // attribution carries a tenant; omitted entirely when `None`.
     if let Some(tenant) = ctx.attribution.tenant.as_deref() {
         span.set_attribute(KeyValue::new("app.tenant", tenant.to_string()));
@@ -109,7 +109,7 @@ pub fn finalize_llm_call(
         .with("gen_ai.response.model", resolved_model.clone())
         .with("app.client_tag", ctx.attribution.client_tag.clone())
         .with("llm.tier", "standard");
-    // Sprint 021: tenant added to the metric attribute set when present.
+    // Tenant: tenant added to the metric attribute set when present.
     // Absent tenant → no `app.tenant` label on any histogram /
     // counter datapoint.
     if let Some(tenant) = ctx.attribution.tenant.as_deref() {

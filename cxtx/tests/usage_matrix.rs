@@ -1,7 +1,7 @@
 //! Phase 2 & Phase 4 fixture-based parser matrix.
 //!
 //! Each subdirectory under `cxtx/tests/fixtures/usage/` is one row of the
-//! 16-cell provider-matrix documented in Sprint 016. This test iterates
+//! 16-cell provider-provider matrix. This test iterates
 //! every subdirectory, dispatches on the `kind` field in `expected.json`,
 //! feeds the input through the corresponding `cxtx::provider::usage` entry
 //! point, and asserts exact `UsageOutcome` equality.

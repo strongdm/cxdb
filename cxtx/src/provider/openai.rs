@@ -345,7 +345,7 @@ pub fn finalize_stream(
 
     // Decide UsageOutcome for the streamed assistant turn. If the stream
     // accumulator picked up a `usage` object, it's Reported. Otherwise,
-    // it's a clean `not_reported` — preserve finish reasons for Sprint 017.
+    // it's a clean `not_reported` — preserve finish reasons for the OTEL pipeline.
     let usage = match exchange.usage.clone() {
         Some(raw) => Some(UsageOutcome::Reported(raw)),
         None => Some(UsageOutcome::NotReported {
@@ -565,7 +565,7 @@ impl OpenAiExchange {
 }
 
 /// Derive a single raw finish-reason string from a Responses-API `response`
-/// object. This is the pre-canonical value — Sprint 017 maps to
+/// object. This is the pre-canonical value — This maps to
 /// `gen_ai.response.finish_reasons`.
 fn responses_raw_finish_reason(response: &Value) -> String {
     let status = response

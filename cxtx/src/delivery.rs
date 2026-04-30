@@ -27,7 +27,7 @@ enum WorkerMessage {
     Shutdown(oneshot::Sender<()>),
 }
 
-/// Sprint 018 P3.3: every queue entry pairs the payload with the
+/// P3.3: every queue entry pairs the payload with the
 /// originating OTEL `Context` so retries + delayed re-attempts land as
 /// children of the originating request rather than orphan traces.
 ///

@@ -21,7 +21,7 @@ pub struct AppAttribution {
     pub provider_kind: String,
     pub session_id: String,
     pub user: Option<String>,
-    /// Sprint 021: tenant label (`app.tenant`) sourced from
+    /// Tenant: tenant label (`app.tenant`) sourced from
     /// `ContextMetadata.tenant`. `None` means the caller did not set a
     /// tenant — emit sites MUST omit the attribute entirely. No
     /// sentinel, no empty string.
@@ -58,7 +58,7 @@ impl AppAttribution {
             .map(|p| p.on_behalf_of.clone())
             .filter(|s| !s.is_empty());
 
-        // Sprint 021 Decision #8: tenant flows through `AppAttribution`
+        // Decision #8: tenant flows through `AppAttribution`
         // (NOT as a sibling on `CallContext`). Empty string is treated
         // as `None` — the missing-tenant rule is applied at the
         // flattening seam so downstream emit sites never have to
@@ -144,7 +144,7 @@ mod tests {
         assert_eq!(a.tenant, None);
     }
 
-    /// Sprint 021: tenant on `ContextMetadata` flows through to
+    /// Tenant: tenant on `ContextMetadata` flows through to
     /// `AppAttribution.tenant` at the flattening seam.
     #[test]
     fn attribution_from_metadata_copies_tenant_when_present() {
@@ -160,7 +160,7 @@ mod tests {
         assert_eq!(a.tenant.as_deref(), Some("tenant-x"));
     }
 
-    /// Sprint 021: empty-string tenant on the wire is treated as absent
+    /// Tenant: empty-string tenant on the wire is treated as absent
     /// (no sentinel, no empty-string stamp).
     #[test]
     fn attribution_from_metadata_treats_empty_tenant_as_none() {

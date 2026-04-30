@@ -32,7 +32,7 @@ pub mod turns;
 pub(crate) mod test_sync {
     use std::sync::{Mutex, MutexGuard};
 
-    /// Sprint 021: shared lock for tests that mutate `CXTX_TENANT` (or
+    /// Tenant: shared lock for tests that mutate `CXTX_TENANT` (or
     /// any other process-global env). `cargo test` runs test functions
     /// in parallel within a binary — concurrent env writes flake.
     /// Every test that reads or writes these env vars MUST hold

@@ -1,4 +1,4 @@
-//! Sprint 018 Phase 3 trace-continuity tests.
+//! Trace-continuity tests for cxtx.
 //!
 //! These tests spin up a tiny HTTP server inside the test process that
 //! captures inbound headers, then exercise the `cxdb_otel::http`
