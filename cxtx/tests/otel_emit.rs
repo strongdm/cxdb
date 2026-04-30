@@ -722,6 +722,57 @@ async fn p3_t5_openai_responses_tool_use() {
     );
 }
 
+/// OpenAI Responses-API `failed:<code>` events stamp the failure code
+/// as `error.type` on the span (in addition to setting the canonical
+/// `finish_reasons=["error"]`). Without this, downstream observability
+/// loses the only signal that distinguishes rate limits from server
+/// errors on the happy-emit (Reported) path.
+#[tokio::test(flavor = "multi_thread")]
+async fn openai_responses_failed_stamps_error_type_on_span() {
+    use cxtx::provider::usage::openai_responses_completed_outcome;
+    use serde_json::json;
+
+    let harness = serial_lock().lock().unwrap_or_else(|e| e.into_inner());
+    harness.reset();
+
+    let event = json!({
+        "type": "response.completed",
+        "response": {
+            "model": "gpt-5.4",
+            "status": "failed",
+            "error": {"code": "rate_limited", "message": "slow down"},
+            "usage": {"input_tokens": 8, "output_tokens": 0}
+        }
+    });
+    let outcome = openai_responses_completed_outcome(&event);
+
+    let ctx = CallContext::new(
+        Instant::now(),
+        "gpt-5.4",
+        "openai",
+        AppAttribution {
+            client_tag: "cxtx/codex".to_string(),
+            wrapper_command: "codex".to_string(),
+            wrapper_version: "0.1.0".to_string(),
+            provider_kind: "openai".to_string(),
+            session_id: "sess-failed".to_string(),
+            user: None,
+            tenant: None,
+        },
+        true,
+    );
+    finalize_llm_call(&ctx, &outcome, Some("gpt-5.4"));
+
+    let spans = harness.drain_spans();
+    assert_eq!(spans.len(), 1);
+    assert_eq!(
+        attr_value(&spans[0], "error.type").as_deref(),
+        Some("rate_limited"),
+        "Responses failed:<code> must stamp error.type=<code> on span; got {:?}",
+        span_attrs(&spans[0])
+    );
+}
+
 /// P3-T6: WS breadcrumb — drive a mock WS exchange through
 /// `WebsocketCapture`; assert ONE `usage_missing{reason=not_reported,
 /// gen_ai.system=openai}` increment + ZERO spans emitted by the WS path.

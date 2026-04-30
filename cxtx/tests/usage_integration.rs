@@ -155,6 +155,42 @@ fn turn_metrics_roundtrip_preserves_usage_status() {
     assert!(has_field_8, "msgpack field '8' missing: {:?}", map);
 }
 
+/// Non-streaming Responses-API JSON without a `usage` object must still
+/// produce a `NotReported` outcome whose finish reason is preserved from
+/// the response status. Without this, the OTEL pipeline would lose the
+/// only signal that distinguishes a clean-but-usage-less call from an
+/// upstream error.
+#[test]
+fn openai_responses_json_body_without_usage_returns_not_reported() {
+    use cxtx::provider::usage::{openai_responses_json_body_outcome, RawUsage, UsageOutcome};
+    use serde_json::json;
+
+    let body = json!({
+        "id": "resp_x",
+        "model": "gpt-5.4",
+        "status": "completed",
+        "output": [
+            {"type": "message", "role": "assistant",
+             "content": [{"type": "output_text", "text": "ok"}]}
+        ]
+        // Note: no "usage" key.
+    });
+    let outcome = openai_responses_json_body_outcome(&body);
+    match outcome {
+        UsageOutcome::NotReported { partial } => {
+            assert_eq!(
+                partial,
+                RawUsage {
+                    finish_reasons_raw: vec!["completed".to_string()],
+                    ..RawUsage::default()
+                },
+                "NotReported partial must preserve the canonical finish reason"
+            );
+        }
+        other => panic!("expected NotReported, got {other:?}"),
+    }
+}
+
 /// Round-trip sanity: a TurnMetrics with usage_status=None skips the
 /// field entirely, preserving backward compatibility with pre-sprint
 /// readers.

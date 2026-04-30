@@ -120,8 +120,15 @@ pub fn finalize_llm_call(
         UsageOutcome::Reported(raw) => {
             // Canonical finish reasons first — if validation fails we
             // still want them on the span.
-            let finish = canonical_finish(ctx.provider_system, &raw.finish_reasons_raw);
+            let (finish, err_type) =
+                canonical_finish(ctx.provider_system, &raw.finish_reasons_raw);
             set_string_array(&mut span, "gen_ai.response.finish_reasons", &finish);
+            // Responses-API `failed:<code>` carries an error code that the
+            // mapper extracts but we'd otherwise drop. Stamp it as
+            // `error.type` so DD/Honeycomb can pivot on the failure mode.
+            if let Some(err) = err_type.as_deref() {
+                span.set_attribute(KeyValue::new("error.type", err.to_string()));
+            }
 
             // Span-only token attributes (DD LLM Observability reads
             // these; metric uses the derived buckets).
@@ -164,9 +171,13 @@ pub fn finalize_llm_call(
         }
         UsageOutcome::NotReported { partial } => {
             // Preserve real finish reasons when possible.
-            let finish = canonical_finish(ctx.provider_system, &partial.finish_reasons_raw);
+            let (finish, err_type) =
+                canonical_finish(ctx.provider_system, &partial.finish_reasons_raw);
             if !finish.is_empty() {
                 set_string_array(&mut span, "gen_ai.response.finish_reasons", &finish);
+            }
+            if let Some(err) = err_type.as_deref() {
+                span.set_attribute(KeyValue::new("error.type", err.to_string()));
             }
             span.set_attribute(KeyValue::new("llm.usage_missing", true));
             let attrs = common_attrs.clone().with("reason", "not_reported");
@@ -212,14 +223,20 @@ fn instant_to_system_time(instant: Instant) -> std::time::SystemTime {
     }
 }
 
-/// Map a provider-native `finish_reasons_raw` vec to the canonical set.
-/// Uses the existing `map_*` helpers from `finish_reasons.rs`.
-fn canonical_finish(provider_system: &str, raws: &[String]) -> Vec<String> {
+/// Map a provider-native `finish_reasons_raw` vec to the canonical set,
+/// returning `(finish_reasons, error_type)`. `error_type` is `Some(code)`
+/// only for OpenAI Responses-API `failed:<code>` entries; the caller
+/// stamps it as the `error.type` span attribute. Anthropic + ChatCompletions
+/// always return `None`.
+fn canonical_finish(
+    provider_system: &str,
+    raws: &[String],
+) -> (Vec<String>, Option<String>) {
     if raws.is_empty() {
-        return Vec::new();
+        return (Vec::new(), None);
     }
     match provider_system {
-        "anthropic" => raws.iter().map(|s| map_anthropic(s)).collect(),
+        "anthropic" => (raws.iter().map(|s| map_anthropic(s)).collect(), None),
         "openai" => {
             // Disambiguate ChatCompletions (any `stop`/`length`/`tool_calls`/
             // `content_filter` raw value) vs Responses (`completed`,
@@ -237,6 +254,7 @@ fn canonical_finish(provider_system: &str, raws: &[String]) -> Vec<String> {
             }) {
                 use crate::otel::finish_reasons::ResponsesStatus;
                 let mut out: Vec<String> = Vec::new();
+                let mut err_type: Option<String> = None;
                 for raw in raws {
                     let status = if raw == "completed" {
                         ResponsesStatus::Completed { has_tool_use: false }
@@ -260,16 +278,21 @@ fn canonical_finish(provider_system: &str, raws: &[String]) -> Vec<String> {
                         out.push(raw.clone());
                         continue;
                     };
-                    let (mut mapped, _) = map_openai_responses(status);
+                    let (mut mapped, mapped_err) = map_openai_responses(status);
                     out.append(&mut mapped);
+                    // First non-empty failure code wins. (`failed` without a
+                    // code yields None — leave existing err_type.)
+                    if err_type.is_none() {
+                        err_type = mapped_err;
+                    }
                 }
-                out
+                (out, err_type)
             } else {
                 let refs: Vec<&str> = raws.iter().map(String::as_str).collect();
-                map_openai_chat(&refs)
+                (map_openai_chat(&refs), None)
             }
         }
-        _ => raws.to_vec(),
+        _ => (raws.to_vec(), None),
     }
 }
 

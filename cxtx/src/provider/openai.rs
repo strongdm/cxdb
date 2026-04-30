@@ -92,7 +92,14 @@ pub fn prepare_exchange(
         )],
     };
 
-    let call_context = build_call_context(session, model.clone(), /* is_stream */ true);
+    // Honor the request's streaming flag. ChatCompletions uses `stream:true`
+    // bool; the Responses API uses `stream:true` as well. SSE is the only way
+    // to receive streamed chunks, so a missing flag means non-streaming.
+    let is_stream = payload
+        .get("stream")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let call_context = build_call_context(session, model.clone(), is_stream);
 
     PreparedExchange {
         exchange_id: exchange_id.clone(),
@@ -244,14 +251,26 @@ fn extract_json_usage(payload: &Value) -> Option<UsageOutcome> {
 
     // Responses API: `{response: {...}}` wrapper OR flat top-level.
     let response = payload.get("response").unwrap_or(payload);
+    let finish = responses_raw_finish_reason(response);
     if let Some(usage) = response.get("usage") {
-        let finish = responses_raw_finish_reason(response);
         return Some(UsageOutcome::Reported(openai_responses_usage_from_value(
             usage,
             vec![finish],
         )));
     }
-    None
+    // No usage object — preserve the canonical finish reason as a partial
+    // so the OTEL pipeline still tags the call (and the stored TurnMetrics
+    // gets a `usage_status="not_reported"`).
+    Some(UsageOutcome::NotReported {
+        partial: RawUsage {
+            finish_reasons_raw: if finish.is_empty() {
+                Vec::new()
+            } else {
+                vec![finish]
+            },
+            ..RawUsage::default()
+        },
+    })
 }
 
 fn attach_usage_to_assistant(item: HistoryItem, outcome: Option<UsageOutcome>) -> HistoryItem {
@@ -333,19 +352,13 @@ pub fn finalize_stream(
         )];
     }
 
-    if exchange.content.is_empty() && exchange.tool_calls.is_empty() {
-        if let Some(ctx) = call_context.as_ref() {
-            let outcome = UsageOutcome::NotReported {
-                partial: RawUsage::default(),
-            };
-            finalize_llm_call(ctx, &outcome, exchange.model.as_deref());
-        }
-        return Vec::new();
-    }
-
     // Decide UsageOutcome for the streamed assistant turn. If the stream
     // accumulator picked up a `usage` object, it's Reported. Otherwise,
-    // it's a clean `not_reported` — preserve finish reasons for the OTEL pipeline.
+    // it's a clean `not_reported` — preserve finish reasons for the OTEL
+    // pipeline. Computed BEFORE the empty-content early return so calls
+    // that completed cleanly with billed usage but no assistant text
+    // (e.g., Responses `completed` with empty `output`) still emit cost
+    // telemetry.
     let usage = match exchange.usage.clone() {
         Some(raw) => Some(UsageOutcome::Reported(raw)),
         None => Some(UsageOutcome::NotReported {
@@ -360,6 +373,17 @@ pub fn finalize_stream(
             },
         }),
     };
+
+    if exchange.content.is_empty() && exchange.tool_calls.is_empty() {
+        if let Some(ctx) = call_context.as_ref() {
+            let outcome = usage.clone().unwrap_or(UsageOutcome::NotReported {
+                partial: RawUsage::default(),
+            });
+            finalize_llm_call(ctx, &outcome, exchange.model.as_deref());
+        }
+        return Vec::new();
+    }
+
     if let Some(ctx) = call_context.as_ref() {
         if let Some(outcome) = usage.as_ref() {
             finalize_llm_call(ctx, outcome, exchange.model.as_deref());

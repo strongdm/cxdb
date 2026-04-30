@@ -299,6 +299,14 @@ type TurnMetrics struct {
 
 	// Model is the model used for this turn.
 	Model string `msgpack:"7" json:"model,omitempty"`
+
+	// UsageStatus tags non-happy-path usage parses for OTEL emit.
+	// Empty / missing on the happy "Reported" path; "not_reported" when
+	// the stream finished cleanly with no usage object;
+	// "error:<class>" when the finalize path classified the call as an
+	// upstream error. Additive-only field; pre-existing records leave
+	// it unset.
+	UsageStatus string `msgpack:"8" json:"usage_status,omitempty"`
 }
 
 // =============================================================================
@@ -427,6 +435,11 @@ type ContextMetadata struct {
 
 	// Custom contains arbitrary key-value metadata.
 	Custom map[string]string `msgpack:"4" json:"custom,omitempty"`
+
+	// Tenant labels the context for OTEL `app.tenant` cost attribution.
+	// Empty / missing means no tenant — the OTEL emit path MUST omit the
+	// attribute entirely (no sentinel, no empty-string stamp).
+	Tenant string `msgpack:"5" json:"tenant,omitempty"`
 
 	// Provenance captures the origin story of this context.
 	// Includes process identity, user identity, trace context, and more.

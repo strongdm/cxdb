@@ -1,6 +1,6 @@
 {
   "registry_version": 1,
-  "bundle_id": "cxdb.conversation-item.v3",
+  "bundle_id": "cxdb.conversation-item.v3.1",
   "types": {
     "cxdb.ConversationItem": {
       "versions": {
@@ -102,7 +102,8 @@
             "4": { "name": "cached_tokens", "type": "int64", "optional": true },
             "5": { "name": "reasoning_tokens", "type": "int64", "optional": true },
             "6": { "name": "duration_ms", "type": "int64", "optional": true },
-            "7": { "name": "model", "type": "string", "optional": true }
+            "7": { "name": "model", "type": "string", "optional": true },
+            "8": { "name": "usage_status", "type": "string", "optional": true }
           }
         }
       }
@@ -180,6 +181,7 @@
             "2": { "name": "title", "type": "string", "optional": true },
             "3": { "name": "labels", "type": "array", "items": "string", "optional": true },
             "4": { "name": "custom", "type": "map", "optional": true },
+            "5": { "name": "tenant", "type": "string", "optional": true },
             "10": { "name": "provenance", "type": "ref", "ref": "cxdb.Provenance", "optional": true }
           }
         }

@@ -82,7 +82,13 @@ pub fn prepare_exchange(
         )],
     };
 
-    let call_context = build_call_context(session, model.clone(), /* is_stream */ true);
+    // Honor the request's `stream` flag so non-streaming JSON calls don't
+    // mis-tag `gen_ai.request.is_stream=true`.
+    let is_stream = payload
+        .get("stream")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let call_context = build_call_context(session, model.clone(), is_stream);
 
     PreparedExchange {
         exchange_id: exchange_id.clone(),

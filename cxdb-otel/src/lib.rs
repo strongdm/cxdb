@@ -87,16 +87,22 @@ pub fn trailer_to_context(trailer: &TraceContextTrailer) -> Context {
 }
 
 /// Parsed environment configuration for OTEL bootstrap.
+///
+/// Only fields the bootstrap actually consumes live here. The OTLP/gRPC
+/// exporter and the trace SDK auto-read several other env vars on their
+/// own — `OTEL_EXPORTER_OTLP_HEADERS` (auth headers, picked up by
+/// `opentelemetry_otlp::TonicExporterBuilder` when `with_metadata` is not
+/// called), and `OTEL_TRACES_SAMPLER` / `OTEL_TRACES_SAMPLER_ARG`
+/// (consumed by `opentelemetry_sdk::trace::Config::default()`). Don't
+/// re-add fields here unless we explicitly thread them into a builder
+/// API; otherwise the API misleads operators.
 #[derive(Debug, Clone, Default)]
 pub struct OtelConfig {
     pub endpoint: Option<String>,
-    pub headers: Option<String>,
     pub service_name: Option<String>,
     pub resource_attributes: Option<String>,
-    pub traces_sampler: Option<String>,
     pub metric_export_interval_ms: Option<u64>,
     pub temporality_preference: Option<String>,
-    pub default_histogram_aggregation: Option<String>,
 }
 
 impl OtelConfig {
@@ -111,16 +117,11 @@ impl OtelConfig {
 
         Self {
             endpoint: read("OTEL_EXPORTER_OTLP_ENDPOINT"),
-            headers: read("OTEL_EXPORTER_OTLP_HEADERS"),
             service_name: read("OTEL_SERVICE_NAME"),
             resource_attributes: read("OTEL_RESOURCE_ATTRIBUTES"),
-            traces_sampler: read("OTEL_TRACES_SAMPLER"),
             metric_export_interval_ms: read("OTEL_METRIC_EXPORT_INTERVAL")
                 .and_then(|v| v.parse().ok()),
             temporality_preference: read("OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE"),
-            default_histogram_aggregation: read(
-                "OTEL_EXPORTER_OTLP_METRICS_DEFAULT_HISTOGRAM_AGGREGATION",
-            ),
         }
     }
 

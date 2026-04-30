@@ -482,6 +482,12 @@ fn turn_metrics_payload(value: &TurnMetrics) -> Value {
     if !value.model.is_empty() {
         obj.insert("model".to_string(), Value::String(value.model.clone()));
     }
+    if let Some(usage_status) = value.usage_status.as_deref() {
+        obj.insert(
+            "usage_status".to_string(),
+            Value::String(usage_status.to_string()),
+        );
+    }
     Value::Object(obj)
 }
 
@@ -804,6 +810,50 @@ mod tests {
         assert!(
             !obj.contains_key("tenant"),
             "payload unexpectedly contains tenant key: {obj:?}"
+        );
+    }
+
+    fn base_metrics() -> TurnMetrics {
+        TurnMetrics {
+            input_tokens: 10,
+            output_tokens: 4,
+            total_tokens: 14,
+            cached_tokens: None,
+            reasoning_tokens: None,
+            duration_ms: None,
+            model: "claude-opus".to_string(),
+            usage_status: None,
+        }
+    }
+
+    /// `usage_status` round-trips through the HTTP payload when populated.
+    /// Without this, the Phase-3 telemetry tag would be silently dropped on
+    /// the wire even though the wire schema reserves tag 8 for it.
+    #[test]
+    fn turn_metrics_payload_includes_usage_status_when_set() {
+        let mut metrics = base_metrics();
+        metrics.usage_status = Some("not_reported".to_string());
+        let payload = turn_metrics_payload(&metrics);
+        assert_eq!(
+            payload
+                .as_object()
+                .and_then(|m| m.get("usage_status"))
+                .and_then(Value::as_str),
+            Some("not_reported")
+        );
+    }
+
+    /// `usage_status` is OMITTED from the payload when `None` — no sentinel.
+    #[test]
+    fn turn_metrics_payload_omits_usage_status_when_none() {
+        let metrics = base_metrics();
+        let payload = turn_metrics_payload(&metrics);
+        assert!(
+            !payload
+                .as_object()
+                .map(|m| m.contains_key("usage_status"))
+                .unwrap_or(false),
+            "payload unexpectedly contains usage_status: {payload:?}"
         );
     }
 }
