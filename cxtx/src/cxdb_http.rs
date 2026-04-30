@@ -4,7 +4,8 @@ use cxdb::types::{
     SystemMessage, ToolCall, ToolCallError, ToolCallItem, ToolCallResult, ToolResult, TurnMetrics,
     TypeIDConversationItem, TypeVersionConversationItem, UserInput,
 };
-use reqwest::{Client, StatusCode};
+use opentelemetry::Context as OtelContext;
+use reqwest::{Client, Method, StatusCode};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -69,15 +70,53 @@ impl CxdbHttpClient {
         })
     }
 
+    /// Uniform request builder — every outbound call MUST go through
+    /// this method so `inject_context` is applied exactly once before
+    /// `.send()`. Sprint 018 Phase 3.2 invariant.
+    fn request(&self, method: Method, url: Url) -> reqwest::RequestBuilder {
+        let rb = self
+            .client
+            .request(method, url)
+            .header("X-CXDB-Client-Tag", &self.client_tag);
+        // Inject W3C TraceContext headers (`traceparent` / `tracestate`)
+        // from the current task's Context. The async delivery worker
+        // uses `request_with_context` instead, because `ContextGuard` is
+        // not `Send` and cannot cover `.await` boundaries there.
+        cxdb_otel::http::inject_reqwest(rb)
+    }
+
+    /// Variant that injects from an explicit `Context` rather than
+    /// relying on thread-local `Context::current()`. Used by the async
+    /// delivery worker in Sprint 018 Phase 3.3 — that worker captures
+    /// the caller's context at enqueue time and threads it through
+    /// every retry without attaching it (attach + await is not Send-safe).
+    fn request_with_context(
+        &self,
+        method: Method,
+        url: Url,
+        cx: &OtelContext,
+    ) -> reqwest::RequestBuilder {
+        let rb = self
+            .client
+            .request(method, url)
+            .header("X-CXDB-Client-Tag", &self.client_tag);
+        cxdb_otel::http::inject_reqwest_with(rb, cx)
+    }
+
     pub async fn create_context(&self) -> std::result::Result<u64, CxdbError> {
+        self.create_context_with_context(&OtelContext::current()).await
+    }
+
+    pub async fn create_context_with_context(
+        &self,
+        cx: &OtelContext,
+    ) -> std::result::Result<u64, CxdbError> {
         let url = self
             .base_url
             .join("/v1/contexts/create")
             .map_err(|err| CxdbError::Permanent(err.to_string()))?;
         let response = self
-            .client
-            .post(url)
-            .header("X-CXDB-Client-Tag", &self.client_tag)
+            .request_with_context(Method::POST, url, cx)
             .json(&json!({ "base_turn_id": "0" }))
             .send()
             .await
@@ -104,15 +143,23 @@ impl CxdbHttpClient {
         context_id: u64,
         item: &ConversationItem,
     ) -> std::result::Result<AppendResponse, CxdbError> {
-        self.ensure_conversation_type_registered().await?;
+        self.append_turn_with_context(context_id, item, &OtelContext::current())
+            .await
+    }
+
+    pub async fn append_turn_with_context(
+        &self,
+        context_id: u64,
+        item: &ConversationItem,
+        cx: &OtelContext,
+    ) -> std::result::Result<AppendResponse, CxdbError> {
+        self.ensure_conversation_type_registered_with(cx).await?;
         let url = self
             .base_url
             .join(&format!("/v1/contexts/{context_id}/append"))
             .map_err(|err| CxdbError::Permanent(err.to_string()))?;
         let response = self
-            .client
-            .post(url)
-            .header("X-CXDB-Client-Tag", &self.client_tag)
+            .request_with_context(Method::POST, url, cx)
             .json(&json!({
                 "type_id": TypeIDConversationItem,
                 "type_version": TypeVersionConversationItem,
@@ -140,9 +187,7 @@ impl CxdbHttpClient {
             .join("/v1/contexts?include_provenance=1")
             .context("failed to build contexts URL")?;
         let response = self
-            .client
-            .get(url)
-            .header("X-CXDB-Client-Tag", &self.client_tag)
+            .request(Method::GET, url)
             .send()
             .await
             .context("request to list contexts failed")?;
@@ -161,9 +206,7 @@ impl CxdbHttpClient {
             .join(&format!("/v1/contexts/{context_id}/provenance"))
             .context("failed to build provenance URL")?;
         let response = self
-            .client
-            .get(url)
-            .header("X-CXDB-Client-Tag", &self.client_tag)
+            .request(Method::GET, url)
             .send()
             .await
             .context("request to get provenance failed")?;
@@ -176,7 +219,10 @@ impl CxdbHttpClient {
             .context("failed to decode provenance response")
     }
 
-    async fn ensure_conversation_type_registered(&self) -> std::result::Result<(), CxdbError> {
+    async fn ensure_conversation_type_registered_with(
+        &self,
+        cx: &OtelContext,
+    ) -> std::result::Result<(), CxdbError> {
         if self.registry_ready.load(Ordering::Acquire) {
             return Ok(());
         }
@@ -188,9 +234,7 @@ impl CxdbHttpClient {
             ))
             .map_err(|err| CxdbError::Permanent(err.to_string()))?;
         let response = self
-            .client
-            .get(descriptor_url)
-            .header("X-CXDB-Client-Tag", &self.client_tag)
+            .request_with_context(Method::GET, descriptor_url, cx)
             .send()
             .await
             .map_err(classify_reqwest_error)?;
@@ -219,9 +263,7 @@ impl CxdbHttpClient {
             .join(&format!("/v1/registry/bundles/{bundle_id}"))
             .map_err(|err| CxdbError::Permanent(err.to_string()))?;
         let response = self
-            .client
-            .put(bundle_url)
-            .header("X-CXDB-Client-Tag", &self.client_tag)
+            .request_with_context(Method::PUT, bundle_url, cx)
             .json(&bundle)
             .send()
             .await
@@ -572,6 +614,12 @@ fn context_metadata_payload(value: &ContextMetadata) -> Value {
     if !value.custom.is_empty() {
         obj.insert("custom".to_string(), json!(value.custom));
     }
+    // Sprint 021: tenant is emitted only when present. Missing-tenant
+    // rule (Decision #1): no sentinel, no empty string — the key is
+    // omitted entirely when `tenant` is `None`.
+    if let Some(tenant) = value.tenant.as_deref() {
+        obj.insert("tenant".to_string(), Value::String(tenant.to_string()));
+    }
     if let Some(provenance) = value.provenance.as_ref() {
         obj.insert("provenance".to_string(), provenance_payload(provenance));
     }
@@ -713,4 +761,49 @@ fn provenance_payload(value: &Provenance) -> Value {
         obj.insert("captured_at".to_string(), Value::from(value.captured_at));
     }
     Value::Object(obj)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cxdb::types::ContextMetadata;
+    use std::collections::HashMap;
+
+    fn base_metadata() -> ContextMetadata {
+        ContextMetadata {
+            client_tag: "cxtx/claude".to_string(),
+            title: String::new(),
+            labels: Vec::new(),
+            custom: HashMap::new(),
+            tenant: None,
+            provenance: None,
+        }
+    }
+
+    /// Sprint 021 P1-T5 (happy): tenant appears in the serialized HTTP
+    /// JSON body when present.
+    #[test]
+    fn context_metadata_payload_includes_tenant_when_set() {
+        let mut meta = base_metadata();
+        meta.tenant = Some("tenant-a".to_string());
+        let payload = context_metadata_payload(&meta);
+        let obj = payload.as_object().expect("object");
+        assert_eq!(
+            obj.get("tenant").and_then(Value::as_str),
+            Some("tenant-a")
+        );
+    }
+
+    /// Sprint 021 P1-T5 (absent): tenant is OMITTED from the JSON body
+    /// when `None` — no sentinel, no empty string.
+    #[test]
+    fn context_metadata_payload_omits_tenant_when_none() {
+        let meta = base_metadata();
+        let payload = context_metadata_payload(&meta);
+        let obj = payload.as_object().expect("object");
+        assert!(
+            !obj.contains_key("tenant"),
+            "payload unexpectedly contains tenant key: {obj:?}"
+        );
+    }
 }

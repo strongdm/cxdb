@@ -1,0 +1,15 @@
+{
+  "kind": "openai_chat_terminal_chunk",
+  "outcome": {
+    "Reported": {
+      "input_tokens": 150,
+      "output_tokens": 60,
+      "cached_tokens": 40,
+      "reasoning_tokens": 10,
+      "cache_creation_total": 0,
+      "cache_creation_5m": 0,
+      "cache_creation_1h": 0,
+      "finish_reasons_raw": ["stop"]
+    }
+  }
+}

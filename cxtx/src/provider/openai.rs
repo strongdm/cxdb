@@ -1,5 +1,12 @@
 use serde_json::Value;
+use std::time::Instant;
 
+use crate::otel::call_context::{AppAttribution, CallContext};
+use crate::otel::llm_call::finalize_llm_call;
+use crate::provider::usage::{
+    classify_http_status, openai_chat_usage_from_value, openai_responses_usage_from_value,
+    ErrorClass, RawUsage, UsageOutcome,
+};
 use crate::provider::{ExchangeState, PreparedExchange};
 use crate::session::SessionRuntime;
 use crate::turns::{tool_call_record, ArtifactRefs, HistoryItem, ToolCallRecord, TurnEnvelope};
@@ -19,6 +26,23 @@ pub struct OpenAiExchange {
     tool_calls: Vec<PartialToolCall>,
     finish_reason: Option<String>,
     parse_errors: Vec<String>,
+    /// Streaming ChatCompletions: populated if the terminal non-`[DONE]`
+    /// chunk carried a `usage` object (i.e., caller set
+    /// `stream_options.include_usage=true`).
+    /// Streaming Responses API: populated on `response.completed`.
+    /// Non-streaming JSON: left unpopulated by the stream path; the JSON
+    /// finalize path parses `usage` from the body directly.
+    usage: Option<RawUsage>,
+    /// All finish-reason values observed across `choices[]` (ChatCompletions).
+    /// Kept alongside `usage` because the `n>1` and "no usage" paths both
+    /// need the raw list. For Responses API this gets a single synthesized
+    /// entry (response.status or incomplete_details.reason) at the terminal
+    /// event.
+    finish_reasons_raw: Vec<String>,
+    /// Per-exchange OTEL plumbing. Threaded in by `prepare_exchange` and
+    /// consumed by `finalize_json` / `finalize_stream`. Not part of
+    /// `HistoryItem` — replay dedup ignores it.
+    call_context: Option<CallContext>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -68,12 +92,35 @@ pub fn prepare_exchange(
         )],
     };
 
+    let call_context = build_call_context(session, model.clone(), /* is_stream */ true);
+
     PreparedExchange {
         exchange_id: exchange_id.clone(),
         model: model.clone(),
         request_turns,
-        state: ExchangeState::OpenAi(OpenAiExchange::new(exchange_id, model)),
+        state: ExchangeState::OpenAi(OpenAiExchange::new_with_context(
+            exchange_id,
+            model,
+            call_context,
+        )),
     }
+}
+
+fn build_call_context(
+    session: &SessionRuntime,
+    model: Option<String>,
+    is_stream: bool,
+) -> Option<CallContext> {
+    let metadata = session.metadata();
+    let attribution = AppAttribution::from_metadata(metadata);
+    let request_model = model.unwrap_or_default();
+    Some(CallContext::new(
+        Instant::now(),
+        request_model,
+        "openai",
+        attribution,
+        is_stream,
+    ))
 }
 
 pub fn finalize_json(
@@ -84,7 +131,18 @@ pub fn finalize_json(
     body: &[u8],
     artifact_refs: &ArtifactRefs,
 ) -> Vec<TurnEnvelope> {
+    let call_context = exchange.call_context.clone();
     if status >= 400 {
+        if let Some(ctx) = call_context.as_ref() {
+            let outcome = error_outcome(
+                status,
+                format!(
+                    "OpenAI upstream returned HTTP {status}: {}",
+                    String::from_utf8_lossy(body).trim()
+                ),
+            );
+            finalize_llm_call(ctx, &outcome, None);
+        }
         let body_excerpt = String::from_utf8_lossy(body);
         return vec![session.provider_error_turn(
             &exchange.exchange_id,
@@ -101,6 +159,13 @@ pub fn finalize_json(
     let payload = match serde_json::from_slice::<Value>(body) {
         Ok(payload) => payload,
         Err(err) => {
+            if let Some(ctx) = call_context.as_ref() {
+                let outcome = UsageOutcome::Error {
+                    class: ErrorClass::MalformedJson,
+                    detail: err.to_string(),
+                };
+                finalize_llm_call(ctx, &outcome, None);
+            }
             return vec![session.provider_error_turn(
                 &exchange.exchange_id,
                 "response_parse_error",
@@ -111,8 +176,29 @@ pub fn finalize_json(
         }
     };
 
+    let usage_outcome = extract_json_usage(&payload);
+    let response_model = payload
+        .get("model")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            payload
+                .get("response")
+                .and_then(|r| r.get("model"))
+                .and_then(Value::as_str)
+        })
+        .map(|s| s.to_string());
+    if let Some(ctx) = call_context.as_ref() {
+        let outcome_for_emit = usage_outcome.clone().unwrap_or(UsageOutcome::NotReported {
+            partial: RawUsage::default(),
+        });
+        finalize_llm_call(ctx, &outcome_for_emit, response_model.as_deref());
+    }
+
     match parse_assistant_payload(&payload, exchange.model.as_deref()) {
-        Ok(Some(item)) => vec![session.append_history_item(&exchange.exchange_id, item)],
+        Ok(Some(item)) => {
+            let item = attach_usage_to_assistant(item, usage_outcome);
+            vec![session.append_history_item(&exchange.exchange_id, item)]
+        }
         Ok(None) => Vec::new(),
         Err(err) => vec![session.provider_error_turn(
             &exchange.exchange_id,
@@ -124,6 +210,69 @@ pub fn finalize_json(
     }
 }
 
+/// Extract `usage` from a non-streaming JSON body. Handles both the
+/// ChatCompletions top-level `usage` object and the Responses API
+/// `response.usage` shape (plus the flat `{usage}` shape used by some
+/// Responses endpoints).
+fn extract_json_usage(payload: &Value) -> Option<UsageOutcome> {
+    // ChatCompletions: usage at top-level, finish reasons from choices[].
+    if let Some(choices) = payload.get("choices").and_then(Value::as_array) {
+        let finish_reasons = choices
+            .iter()
+            .filter_map(|c| {
+                let idx = c.get("index").and_then(Value::as_u64).unwrap_or(0);
+                c.get("finish_reason")
+                    .and_then(Value::as_str)
+                    .map(|s| (idx, s.to_string()))
+            })
+            .collect::<Vec<_>>();
+        let mut finish_sorted = finish_reasons;
+        finish_sorted.sort_by_key(|(idx, _)| *idx);
+        let finish = finish_sorted.into_iter().map(|(_, s)| s).collect();
+        if let Some(usage) = payload.get("usage") {
+            return Some(UsageOutcome::Reported(openai_chat_usage_from_value(
+                usage, finish,
+            )));
+        }
+        return Some(UsageOutcome::NotReported {
+            partial: RawUsage {
+                finish_reasons_raw: finish,
+                ..RawUsage::default()
+            },
+        });
+    }
+
+    // Responses API: `{response: {...}}` wrapper OR flat top-level.
+    let response = payload.get("response").unwrap_or(payload);
+    if let Some(usage) = response.get("usage") {
+        let finish = responses_raw_finish_reason(response);
+        return Some(UsageOutcome::Reported(openai_responses_usage_from_value(
+            usage,
+            vec![finish],
+        )));
+    }
+    None
+}
+
+fn attach_usage_to_assistant(item: HistoryItem, outcome: Option<UsageOutcome>) -> HistoryItem {
+    match item {
+        HistoryItem::AssistantTurn {
+            text,
+            tool_calls,
+            model,
+            finish_reason,
+            usage: _,
+        } => HistoryItem::AssistantTurn {
+            text,
+            tool_calls,
+            model,
+            finish_reason,
+            usage: outcome,
+        },
+        other => other,
+    }
+}
+
 pub fn finalize_stream(
     session: &SessionRuntime,
     exchange: OpenAiExchange,
@@ -132,7 +281,15 @@ pub fn finalize_stream(
     artifact_refs: &ArtifactRefs,
     malformed_remainder: Option<String>,
 ) -> Vec<TurnEnvelope> {
+    let call_context = exchange.call_context.clone();
     if let Some(remainder) = malformed_remainder.filter(|remainder| !remainder.trim().is_empty()) {
+        if let Some(ctx) = call_context.as_ref() {
+            let outcome = UsageOutcome::Error {
+                class: ErrorClass::MalformedJson,
+                detail: format!("leftover SSE buffer: {remainder}"),
+            };
+            finalize_llm_call(ctx, &outcome, exchange.model.as_deref());
+        }
         return vec![session.provider_error_turn(
             &exchange.exchange_id,
             "malformed_sse_remainder",
@@ -143,6 +300,13 @@ pub fn finalize_stream(
     }
 
     if !exchange.parse_errors.is_empty() {
+        if let Some(ctx) = call_context.as_ref() {
+            let outcome = UsageOutcome::Error {
+                class: ErrorClass::MalformedJson,
+                detail: exchange.parse_errors.join("; "),
+            };
+            finalize_llm_call(ctx, &outcome, exchange.model.as_deref());
+        }
         return vec![session.provider_error_turn(
             &exchange.exchange_id,
             "stream_parse_error",
@@ -153,6 +317,13 @@ pub fn finalize_stream(
     }
 
     if status >= 400 {
+        if let Some(ctx) = call_context.as_ref() {
+            let outcome = error_outcome(
+                status,
+                format!("OpenAI upstream returned HTTP {status} during stream"),
+            );
+            finalize_llm_call(ctx, &outcome, exchange.model.as_deref());
+        }
         return vec![session.provider_error_turn(
             &exchange.exchange_id,
             "provider_error_stream",
@@ -163,7 +334,36 @@ pub fn finalize_stream(
     }
 
     if exchange.content.is_empty() && exchange.tool_calls.is_empty() {
+        if let Some(ctx) = call_context.as_ref() {
+            let outcome = UsageOutcome::NotReported {
+                partial: RawUsage::default(),
+            };
+            finalize_llm_call(ctx, &outcome, exchange.model.as_deref());
+        }
         return Vec::new();
+    }
+
+    // Decide UsageOutcome for the streamed assistant turn. If the stream
+    // accumulator picked up a `usage` object, it's Reported. Otherwise,
+    // it's a clean `not_reported` — preserve finish reasons for Sprint 017.
+    let usage = match exchange.usage.clone() {
+        Some(raw) => Some(UsageOutcome::Reported(raw)),
+        None => Some(UsageOutcome::NotReported {
+            partial: RawUsage {
+                finish_reasons_raw: exchange
+                    .finish_reasons_raw
+                    .iter()
+                    .filter(|s| !s.is_empty())
+                    .cloned()
+                    .collect(),
+                ..RawUsage::default()
+            },
+        }),
+    };
+    if let Some(ctx) = call_context.as_ref() {
+        if let Some(outcome) = usage.as_ref() {
+            finalize_llm_call(ctx, outcome, exchange.model.as_deref());
+        }
     }
 
     let tool_calls = exchange
@@ -178,12 +378,37 @@ pub fn finalize_stream(
             tool_calls,
             model: exchange.model,
             finish_reason: exchange.finish_reason,
+            usage,
         },
     )]
 }
 
+/// Build a `UsageOutcome::Error` from an HTTP status for the OpenAI path.
+pub fn error_outcome(status: u16, detail: impl Into<String>) -> UsageOutcome {
+    UsageOutcome::Error {
+        class: classify_http_status(status),
+        detail: detail.into(),
+    }
+}
+
+/// Build a stream-aborted outcome for the OpenAI path.
+pub fn stream_aborted_outcome(detail: impl Into<String>) -> UsageOutcome {
+    UsageOutcome::Error {
+        class: ErrorClass::StreamAborted,
+        detail: detail.into(),
+    }
+}
+
 impl OpenAiExchange {
     fn new(exchange_id: String, model: Option<String>) -> Self {
+        Self::new_with_context(exchange_id, model, None)
+    }
+
+    fn new_with_context(
+        exchange_id: String,
+        model: Option<String>,
+        call_context: Option<CallContext>,
+    ) -> Self {
         Self {
             exchange_id,
             model,
@@ -191,7 +416,21 @@ impl OpenAiExchange {
             tool_calls: Vec::new(),
             finish_reason: None,
             parse_errors: Vec::new(),
+            usage: None,
+            finish_reasons_raw: Vec::new(),
+            call_context,
         }
+    }
+
+    /// Current parsed usage, exposed for tests.
+    pub fn usage_for_test(&self) -> Option<RawUsage> {
+        self.usage.clone()
+    }
+
+    /// Drop the per-exchange OTEL plumbing — see the `ExchangeState`
+    /// wrapper's `clear_call_context` doc for the use case.
+    pub fn clear_call_context(&mut self) {
+        self.call_context = None;
     }
 
     pub fn absorb_sse_frame(&mut self, frame: &SseFrame) {
@@ -219,27 +458,67 @@ impl OpenAiExchange {
                 .map(|value| value.to_string());
         }
 
-        if let Some(choice) = payload
-            .get("choices")
-            .and_then(Value::as_array)
-            .and_then(|choices| choices.first())
-        {
-            if let Some(delta) = choice.get("delta") {
-                if let Some(content) = delta.get("content") {
-                    self.content.push_str(&content_to_text(content));
+        if let Some(choices) = payload.get("choices").and_then(Value::as_array) {
+            // Content / tool-call accumulator reads from choice[0] as before.
+            if let Some(choice) = choices.first() {
+                if let Some(delta) = choice.get("delta") {
+                    if let Some(content) = delta.get("content") {
+                        self.content.push_str(&content_to_text(content));
+                    }
+                    if let Some(tool_calls) = delta.get("tool_calls").and_then(Value::as_array) {
+                        for tool_call in tool_calls {
+                            absorb_tool_call_delta(&mut self.tool_calls, tool_call);
+                        }
+                    }
                 }
-                if let Some(tool_calls) = delta.get("tool_calls").and_then(Value::as_array) {
-                    for tool_call in tool_calls {
-                        absorb_tool_call_delta(&mut self.tool_calls, tool_call);
+                if self.finish_reason.is_none() {
+                    self.finish_reason = choice
+                        .get("finish_reason")
+                        .and_then(Value::as_str)
+                        .map(|value| value.to_string());
+                }
+            }
+
+            // Track finish_reason for EVERY choice index so `n>1` preserves
+            // the full array. Sort by `index` for deterministic order.
+            let mut indexed: Vec<(u64, String)> = Vec::new();
+            for choice in choices {
+                let index = choice.get("index").and_then(Value::as_u64).unwrap_or(0);
+                if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
+                    indexed.push((index, reason.to_string()));
+                }
+            }
+            if !indexed.is_empty() {
+                indexed.sort_by_key(|(idx, _)| *idx);
+                // Merge: drop existing entries at these indices and re-insert
+                // at their correct positions. Since `choices[].finish_reason`
+                // only fires on the terminal chunk, we can just replace.
+                // Extend while preserving order by index when indices are new.
+                for (idx, reason) in indexed {
+                    let target = idx as usize;
+                    if target < self.finish_reasons_raw.len() {
+                        self.finish_reasons_raw[target] = reason;
+                    } else {
+                        while self.finish_reasons_raw.len() < target {
+                            self.finish_reasons_raw.push(String::new());
+                        }
+                        self.finish_reasons_raw.push(reason);
                     }
                 }
             }
-            if self.finish_reason.is_none() {
-                self.finish_reason = choice
-                    .get("finish_reason")
-                    .and_then(Value::as_str)
-                    .map(|value| value.to_string());
-            }
+        }
+
+        // ChatCompletions terminal chunk with `stream_options.include_usage=true`
+        // carries `usage`. The final non-`[DONE]` chunk in this case usually
+        // has `choices: []` (empty) and `usage: {...}`.
+        if let Some(usage) = payload.get("usage") {
+            let finish_reasons = self
+                .finish_reasons_raw
+                .iter()
+                .filter(|s| !s.is_empty())
+                .cloned()
+                .collect::<Vec<_>>();
+            self.usage = Some(openai_chat_usage_from_value(usage, finish_reasons));
         }
     }
 
@@ -257,6 +536,17 @@ impl OpenAiExchange {
                         self.finish_reason = Some(status.to_string());
                     }
                     absorb_responses_output(response, &mut self.content, &mut self.tool_calls);
+
+                    // Terminal event — harvest usage + derive raw finish reason.
+                    if event_type == "response.completed" {
+                        if let Some(usage) = response.get("usage") {
+                            let finish = responses_raw_finish_reason(response);
+                            self.usage = Some(openai_responses_usage_from_value(
+                                usage,
+                                vec![finish],
+                            ));
+                        }
+                    }
                 }
             }
             "response.output_text.delta" => {
@@ -271,6 +561,56 @@ impl OpenAiExchange {
             }
             _ => {}
         }
+    }
+}
+
+/// Derive a single raw finish-reason string from a Responses-API `response`
+/// object. This is the pre-canonical value — Sprint 017 maps to
+/// `gen_ai.response.finish_reasons`.
+fn responses_raw_finish_reason(response: &Value) -> String {
+    let status = response
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    match status {
+        "completed" => {
+            // Tool-use detection per OTEL_SPEC.md: presence of
+            // output[].type == "function_call".
+            let has_tool_call = response
+                .get("output")
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items.iter().any(|item| {
+                        item.get("type").and_then(Value::as_str) == Some("function_call")
+                    })
+                })
+                .unwrap_or(false);
+            if has_tool_call {
+                "tool_use".to_string()
+            } else {
+                "completed".to_string()
+            }
+        }
+        "incomplete" => response
+            .get("incomplete_details")
+            .and_then(|d| d.get("reason"))
+            .and_then(Value::as_str)
+            .map(|r| format!("incomplete:{r}"))
+            .unwrap_or_else(|| "incomplete".to_string()),
+        "failed" => {
+            let code = response
+                .get("error")
+                .and_then(|e| e.get("code"))
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if code.is_empty() {
+                "failed".to_string()
+            } else {
+                format!("failed:{code}")
+            }
+        }
+        other if !other.is_empty() => other.to_string(),
+        _ => String::new(),
     }
 }
 
@@ -331,6 +671,7 @@ fn parse_message_history(
                     tool_calls: parse_tool_calls(message.get("tool_calls")),
                     model: model.clone(),
                     finish_reason: None,
+                    usage: None,
                 });
             }
             "tool" => history.push(HistoryItem::ToolResult {
@@ -384,6 +725,7 @@ fn parse_input_history(input: &[Value], model: Option<String>) -> Result<Vec<His
                 tool_calls: Vec::new(),
                 model: model.clone(),
                 finish_reason: None,
+                usage: None,
             }),
             "tool" => history.push(HistoryItem::ToolResult {
                 call_id: item
@@ -440,6 +782,7 @@ fn parse_assistant_payload(payload: &Value, fallback_model: Option<&str>) -> Res
                 .and_then(|choice| choice.get("finish_reason"))
                 .and_then(Value::as_str)
                 .map(|value| value.to_string()),
+            usage: None,
         }));
     }
 
@@ -480,6 +823,7 @@ fn parse_assistant_payload(payload: &Value, fallback_model: Option<&str>) -> Res
             .get("status")
             .and_then(Value::as_str)
             .map(|value| value.to_string()),
+        usage: None,
     }))
 }
 

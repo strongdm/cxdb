@@ -1,0 +1,17 @@
+{
+  "type": "response.completed",
+  "response": {
+    "id": "resp_placeholder",
+    "model": "gpt-placeholder",
+    "status": "completed",
+    "output": [
+      {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "ok"}]}
+    ],
+    "usage": {
+      "input_tokens": 90,
+      "output_tokens": 18,
+      "input_tokens_details": {"cached_tokens": 20},
+      "output_tokens_details": {"reasoning_tokens": 5}
+    }
+  }
+}

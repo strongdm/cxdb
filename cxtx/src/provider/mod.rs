@@ -1,5 +1,8 @@
 pub mod anthropic;
 pub mod openai;
+pub mod usage;
+
+pub use usage::{ErrorClass, RawUsage, UsageOutcome};
 
 use anyhow::{anyhow, Context, Result};
 use http::Uri;
@@ -268,6 +271,17 @@ impl ProviderKind {
 }
 
 impl ExchangeState {
+    /// Drop the embedded `CallContext` so this exchange will NOT emit a
+    /// `chat <model>` span / token-usage histogram on finalize. Used on
+    /// the WebSocket relay path, which emits only a breadcrumb counter
+    /// (per `OTEL_SPEC.md` §"WebSocket provider path").
+    pub fn clear_call_context(&mut self) {
+        match self {
+            Self::OpenAi(state) => state.clear_call_context(),
+            Self::Anthropic(state) => state.clear_call_context(),
+        }
+    }
+
     pub fn finalize_json(
         self,
         session: &SessionRuntime,

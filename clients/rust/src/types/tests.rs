@@ -31,6 +31,7 @@ fn fixture_conversation_item() -> ConversationItem {
         title: "Fixture Title".to_string(),
         labels: vec!["alpha".to_string(), "beta".to_string()],
         custom: std::collections::HashMap::from([("env".to_string(), "test".to_string())]),
+        tenant: None,
         provenance: None,
     });
     item

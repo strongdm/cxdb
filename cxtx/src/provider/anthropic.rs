@@ -1,6 +1,12 @@
 use serde_json::Value;
 use std::collections::BTreeMap;
+use std::time::Instant;
 
+use crate::otel::call_context::{AppAttribution, CallContext};
+use crate::otel::llm_call::finalize_llm_call;
+use crate::provider::usage::{
+    anthropic_usage_from_value, classify_http_status, ErrorClass, RawUsage, UsageOutcome,
+};
 use crate::provider::{ExchangeState, PreparedExchange};
 use crate::session::SessionRuntime;
 use crate::turns::{tool_call_record, ArtifactRefs, HistoryItem, TurnEnvelope};
@@ -14,6 +20,13 @@ pub struct AnthropicExchange {
     blocks: BTreeMap<usize, PartialBlock>,
     finish_reason: Option<String>,
     parse_errors: Vec<String>,
+    /// Populated on the terminal `message_delta` SSE event when the sibling
+    /// `usage` object is present.
+    usage: Option<RawUsage>,
+    /// Per-exchange OTEL plumbing. Stamped at `prepare_exchange` time
+    /// from the current `SessionRuntime` metadata. Not part of the
+    /// semantic `HistoryItem` surface — replay dedup ignores it.
+    call_context: Option<CallContext>,
 }
 
 #[derive(Debug, Clone)]
@@ -69,12 +82,35 @@ pub fn prepare_exchange(
         )],
     };
 
+    let call_context = build_call_context(session, model.clone(), /* is_stream */ true);
+
     PreparedExchange {
         exchange_id: exchange_id.clone(),
         model: model.clone(),
         request_turns,
-        state: ExchangeState::Anthropic(AnthropicExchange::new(exchange_id, model)),
+        state: ExchangeState::Anthropic(AnthropicExchange::new_with_context(
+            exchange_id,
+            model,
+            call_context,
+        )),
     }
+}
+
+fn build_call_context(
+    session: &SessionRuntime,
+    model: Option<String>,
+    is_stream: bool,
+) -> Option<CallContext> {
+    let metadata = session.metadata();
+    let attribution = AppAttribution::from_metadata(metadata);
+    let request_model = model.unwrap_or_default();
+    Some(CallContext::new(
+        Instant::now(),
+        request_model,
+        "anthropic",
+        attribution,
+        is_stream,
+    ))
 }
 
 pub fn finalize_json(
@@ -85,7 +121,18 @@ pub fn finalize_json(
     body: &[u8],
     artifact_refs: &ArtifactRefs,
 ) -> Vec<TurnEnvelope> {
+    let call_context = exchange.call_context.clone();
     if status >= 400 {
+        if let Some(ctx) = call_context.as_ref() {
+            let outcome = error_outcome(
+                status,
+                format!(
+                    "Anthropic upstream returned HTTP {status}: {}",
+                    String::from_utf8_lossy(body).trim()
+                ),
+            );
+            finalize_llm_call(ctx, &outcome, None);
+        }
         let body_excerpt = String::from_utf8_lossy(body);
         return vec![session.provider_error_turn(
             &exchange.exchange_id,
@@ -102,6 +149,13 @@ pub fn finalize_json(
     let payload = match serde_json::from_slice::<Value>(body) {
         Ok(payload) => payload,
         Err(err) => {
+            if let Some(ctx) = call_context.as_ref() {
+                let outcome = UsageOutcome::Error {
+                    class: ErrorClass::MalformedJson,
+                    detail: err.to_string(),
+                };
+                finalize_llm_call(ctx, &outcome, None);
+            }
             return vec![session.provider_error_turn(
                 &exchange.exchange_id,
                 "response_parse_error",
@@ -112,15 +166,42 @@ pub fn finalize_json(
         }
     };
 
+    // Extract usage from the response body top-level. Same field mapping as
+    // the streaming path.
+    let stop_reason = payload.get("stop_reason").and_then(Value::as_str);
+    let usage_outcome = payload
+        .get("usage")
+        .map(|usage| UsageOutcome::Reported(anthropic_usage_from_value(usage, stop_reason)));
+
+    let response_model = payload
+        .get("model")
+        .and_then(Value::as_str)
+        .map(|s| s.to_string());
+    if let Some(ctx) = call_context.as_ref() {
+        let outcome_for_emit = usage_outcome.clone().unwrap_or(UsageOutcome::NotReported {
+            partial: RawUsage {
+                finish_reasons_raw: stop_reason
+                    .into_iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+                ..RawUsage::default()
+            },
+        });
+        finalize_llm_call(ctx, &outcome_for_emit, response_model.as_deref());
+    }
+
     match parse_assistant_content(
         payload.get("content").unwrap_or(&Value::Null),
         payload
             .get("model")
             .and_then(Value::as_str)
             .or(exchange.model.as_deref()),
-        payload.get("stop_reason").and_then(Value::as_str),
+        stop_reason,
     ) {
-        Ok(Some(item)) => vec![session.append_history_item(&exchange.exchange_id, item)],
+        Ok(Some(item)) => {
+            let item = attach_usage_to_assistant(item, usage_outcome);
+            vec![session.append_history_item(&exchange.exchange_id, item)]
+        }
         Ok(None) => Vec::new(),
         Err(err) => vec![session.provider_error_turn(
             &exchange.exchange_id,
@@ -132,6 +213,25 @@ pub fn finalize_json(
     }
 }
 
+fn attach_usage_to_assistant(item: HistoryItem, outcome: Option<UsageOutcome>) -> HistoryItem {
+    match item {
+        HistoryItem::AssistantTurn {
+            text,
+            tool_calls,
+            model,
+            finish_reason,
+            usage: _,
+        } => HistoryItem::AssistantTurn {
+            text,
+            tool_calls,
+            model,
+            finish_reason,
+            usage: outcome,
+        },
+        other => other,
+    }
+}
+
 pub fn finalize_stream(
     session: &SessionRuntime,
     exchange: AnthropicExchange,
@@ -140,7 +240,15 @@ pub fn finalize_stream(
     artifact_refs: &ArtifactRefs,
     malformed_remainder: Option<String>,
 ) -> Vec<TurnEnvelope> {
+    let call_context = exchange.call_context.clone();
     if let Some(remainder) = malformed_remainder.filter(|remainder| !remainder.trim().is_empty()) {
+        if let Some(ctx) = call_context.as_ref() {
+            let outcome = UsageOutcome::Error {
+                class: ErrorClass::MalformedJson,
+                detail: format!("leftover SSE buffer: {remainder}"),
+            };
+            finalize_llm_call(ctx, &outcome, exchange.model.as_deref());
+        }
         return vec![session.provider_error_turn(
             &exchange.exchange_id,
             "malformed_sse_remainder",
@@ -151,6 +259,13 @@ pub fn finalize_stream(
     }
 
     if !exchange.parse_errors.is_empty() {
+        if let Some(ctx) = call_context.as_ref() {
+            let outcome = UsageOutcome::Error {
+                class: ErrorClass::MalformedJson,
+                detail: exchange.parse_errors.join("; "),
+            };
+            finalize_llm_call(ctx, &outcome, exchange.model.as_deref());
+        }
         return vec![session.provider_error_turn(
             &exchange.exchange_id,
             "stream_parse_error",
@@ -161,6 +276,13 @@ pub fn finalize_stream(
     }
 
     if status >= 400 {
+        if let Some(ctx) = call_context.as_ref() {
+            let outcome = error_outcome(
+                status,
+                format!("Anthropic upstream returned HTTP {status} during stream"),
+            );
+            finalize_llm_call(ctx, &outcome, exchange.model.as_deref());
+        }
         return vec![session.provider_error_turn(
             &exchange.exchange_id,
             "provider_error_stream",
@@ -173,6 +295,12 @@ pub fn finalize_stream(
     let mut blocks = exchange.blocks.into_iter().collect::<Vec<_>>();
     blocks.sort_by_key(|(index, _)| *index);
     if blocks.is_empty() {
+        if let Some(ctx) = call_context.as_ref() {
+            let outcome = UsageOutcome::NotReported {
+                partial: RawUsage::default(),
+            };
+            finalize_llm_call(ctx, &outcome, exchange.model.as_deref());
+        }
         return Vec::new();
     }
 
@@ -187,6 +315,21 @@ pub fn finalize_stream(
         }
     }
 
+    let usage = exchange.usage.clone().map(UsageOutcome::Reported);
+    if let Some(ctx) = call_context.as_ref() {
+        let outcome_for_emit = usage.clone().unwrap_or(UsageOutcome::NotReported {
+            partial: RawUsage {
+                finish_reasons_raw: exchange
+                    .finish_reason
+                    .iter()
+                    .cloned()
+                    .collect(),
+                ..RawUsage::default()
+            },
+        });
+        finalize_llm_call(ctx, &outcome_for_emit, exchange.model.as_deref());
+    }
+
     vec![session.append_history_item(
         &exchange.exchange_id,
         HistoryItem::AssistantTurn {
@@ -194,19 +337,59 @@ pub fn finalize_stream(
             tool_calls,
             model: exchange.model,
             finish_reason: exchange.finish_reason,
+            usage,
         },
     )]
 }
 
+/// Build a `UsageOutcome::Error` from an HTTP status + operator-facing detail.
+pub fn error_outcome(status: u16, detail: impl Into<String>) -> UsageOutcome {
+    UsageOutcome::Error {
+        class: classify_http_status(status),
+        detail: detail.into(),
+    }
+}
+
+/// Build a `UsageOutcome::Error` with `StreamAborted`.
+pub fn stream_aborted_outcome(detail: impl Into<String>) -> UsageOutcome {
+    UsageOutcome::Error {
+        class: ErrorClass::StreamAborted,
+        detail: detail.into(),
+    }
+}
+
 impl AnthropicExchange {
     fn new(exchange_id: String, model: Option<String>) -> Self {
+        Self::new_with_context(exchange_id, model, None)
+    }
+
+    fn new_with_context(
+        exchange_id: String,
+        model: Option<String>,
+        call_context: Option<CallContext>,
+    ) -> Self {
         Self {
             exchange_id,
             model,
             blocks: BTreeMap::new(),
             finish_reason: None,
             parse_errors: Vec::new(),
+            usage: None,
+            call_context,
         }
+    }
+
+    /// Current parsed usage, exposed for tests and Phase-3 integration glue.
+    pub fn usage_for_test(&self) -> Option<RawUsage> {
+        self.usage.clone()
+    }
+
+    /// Drop the per-exchange OTEL plumbing — used by the WebSocket relay
+    /// path so the shared finalize body doesn't emit a `chat <model>`
+    /// span or token-usage histogram (the WS path emits only the
+    /// breadcrumb counter).
+    pub fn clear_call_context(&mut self) {
+        self.call_context = None;
     }
 
     pub fn absorb_sse_frame(&mut self, frame: &SseFrame) {
@@ -309,6 +492,10 @@ impl AnthropicExchange {
                         .and_then(|delta| delta.get("stop_reason"))
                         .and_then(Value::as_str)
                         .map(|value| value.to_string());
+                }
+                if let Some(usage) = payload.get("usage") {
+                    let stop_reason = self.finish_reason.as_deref();
+                    self.usage = Some(anthropic_usage_from_value(usage, stop_reason));
                 }
             }
             _ => {}
@@ -440,6 +627,7 @@ fn parse_assistant_content(
             tool_calls: Vec::new(),
             model: model.map(|value| value.to_string()),
             finish_reason: finish_reason.map(|value| value.to_string()),
+            usage: None,
         })),
         Value::Array(blocks) => {
             let mut text = String::new();
@@ -476,6 +664,7 @@ fn parse_assistant_content(
                 tool_calls,
                 model: model.map(|value| value.to_string()),
                 finish_reason: finish_reason.map(|value| value.to_string()),
+                usage: None,
             }))
         }
         _ => Err("unsupported Anthropic content shape".to_string()),

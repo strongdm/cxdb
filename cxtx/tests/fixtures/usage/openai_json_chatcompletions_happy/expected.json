@@ -1,0 +1,15 @@
+{
+  "kind": "openai_chat_json_body",
+  "outcome": {
+    "Reported": {
+      "input_tokens": 50,
+      "output_tokens": 15,
+      "cached_tokens": 10,
+      "reasoning_tokens": 3,
+      "cache_creation_total": 0,
+      "cache_creation_5m": 0,
+      "cache_creation_1h": 0,
+      "finish_reasons_raw": ["stop"]
+    }
+  }
+}

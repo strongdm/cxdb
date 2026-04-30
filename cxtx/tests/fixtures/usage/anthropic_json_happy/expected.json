@@ -1,0 +1,15 @@
+{
+  "kind": "anthropic_json_body",
+  "outcome": {
+    "Reported": {
+      "input_tokens": 77,
+      "output_tokens": 13,
+      "cached_tokens": 0,
+      "reasoning_tokens": 0,
+      "cache_creation_total": 0,
+      "cache_creation_5m": 0,
+      "cache_creation_1h": 0,
+      "finish_reasons_raw": ["end_turn"]
+    }
+  }
+}

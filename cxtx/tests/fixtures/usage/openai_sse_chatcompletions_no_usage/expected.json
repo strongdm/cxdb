@@ -1,0 +1,17 @@
+{
+  "kind": "openai_chat_terminal_chunk",
+  "outcome": {
+    "NotReported": {
+      "partial": {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cached_tokens": 0,
+        "reasoning_tokens": 0,
+        "cache_creation_total": 0,
+        "cache_creation_5m": 0,
+        "cache_creation_1h": 0,
+        "finish_reasons_raw": ["stop"]
+      }
+    }
+  }
+}

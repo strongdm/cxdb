@@ -1,3 +1,5 @@
+#![allow(clippy::manual_async_fn)]
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::net::TcpListener;

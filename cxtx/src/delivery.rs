@@ -1,4 +1,6 @@
 use anyhow::{anyhow, Result};
+use opentelemetry::trace::{SpanKind, TraceContextExt, Tracer};
+use opentelemetry::{global, Context as OtelContext, KeyValue};
 use std::collections::VecDeque;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
@@ -21,8 +23,23 @@ pub struct DeliveryHandle {
 
 #[derive(Debug)]
 enum WorkerMessage {
-    Enqueue(QueueItem),
+    Enqueue(QueuedWork),
     Shutdown(oneshot::Sender<()>),
+}
+
+/// Sprint 018 P3.3: every queue entry pairs the payload with the
+/// originating OTEL `Context` so retries + delayed re-attempts land as
+/// children of the originating request rather than orphan traces.
+///
+/// CRITICAL invariant (Design Decision 9): `parent_context` lives
+/// alongside the payload — it MUST NEVER be embedded inside
+/// `TurnEnvelope` / `HistoryItem` / any semantic content, so that
+/// `cxtx/src/session.rs::normalize_history_item` keeps dedup
+/// content-addressable.
+#[derive(Debug, Clone)]
+struct QueuedWork {
+    item: QueueItem,
+    parent_context: OtelContext,
 }
 
 #[derive(Debug, Clone)]
@@ -46,15 +63,24 @@ impl DeliveryHandle {
     }
 
     pub async fn enqueue_create_context(&self) -> Result<()> {
+        // P3.3: capture the originating OTEL context at enqueue time.
+        let parent_context = OtelContext::current();
         self.tx
-            .send(WorkerMessage::Enqueue(QueueItem::CreateContext))
+            .send(WorkerMessage::Enqueue(QueuedWork {
+                item: QueueItem::CreateContext,
+                parent_context,
+            }))
             .await
             .map_err(|_| anyhow!("delivery worker is no longer running"))
     }
 
     pub async fn enqueue_turn(&self, turn: TurnEnvelope) -> Result<()> {
+        let parent_context = OtelContext::current();
         self.tx
-            .send(WorkerMessage::Enqueue(QueueItem::Append(turn)))
+            .send(WorkerMessage::Enqueue(QueuedWork {
+                item: QueueItem::Append(turn),
+                parent_context,
+            }))
             .await
             .map_err(|_| anyhow!("delivery worker is no longer running"))
     }
@@ -74,10 +100,11 @@ struct DeliveryWorker {
     client: CxdbHttpClient,
     session: SessionRuntime,
     ledger: SessionLedgerWriter,
-    queue: VecDeque<QueueItem>,
+    queue: VecDeque<QueuedWork>,
     context_id: Option<u64>,
     degraded: bool,
     retry_delay: Duration,
+    retry_count: u32,
     rx: mpsc::Receiver<WorkerMessage>,
     shutdown: Option<oneshot::Sender<()>>,
     shutdown_deadline: Option<Instant>,
@@ -99,6 +126,7 @@ impl DeliveryWorker {
             context_id: None,
             degraded: false,
             retry_delay: INITIAL_RETRY_DELAY,
+            retry_count: 0,
             rx,
             shutdown: None,
             shutdown_deadline: None,
@@ -124,22 +152,28 @@ impl DeliveryWorker {
                 self.handle_message(message).await;
             }
 
-            let Some(item) = self.queue.front().cloned() else {
+            let Some(work) = self.queue.front().cloned() else {
                 continue;
             };
 
-            match self.process_item(item.clone()).await {
+            match self.process_item(work.clone()).await {
                 Ok(()) => {
                     self.queue.pop_front();
                     self.retry_delay = INITIAL_RETRY_DELAY;
+                    // Reset retry counter for the next queue entry.
+                    self.retry_count = 0;
 
                     if self.degraded && self.queue.is_empty() && !self.recovery_turn_enqueued {
                         self.recovery_turn_enqueued = true;
-                        self.queue
-                            .push_back(QueueItem::Append(self.session.ingest_recovered_turn(0)));
+                        // Recovery synthetic turn — captures fresh context
+                        // since the original parent is long gone.
+                        self.queue.push_back(QueuedWork {
+                            item: QueueItem::Append(self.session.ingest_recovered_turn(0)),
+                            parent_context: OtelContext::current(),
+                        });
                     } else if self.degraded
                         && self.recovery_turn_enqueued
-                        && matches!(item, QueueItem::Append(_))
+                        && matches!(work.item, QueueItem::Append(_))
                         && self.queue.is_empty()
                     {
                         self.degraded = false;
@@ -153,6 +187,8 @@ impl DeliveryWorker {
                 }
                 Err(err) => {
                     self.enter_degraded(&err).await;
+                    // P3.4: bump retry count for the SAME queue entry.
+                    self.retry_count = self.retry_count.saturating_add(1);
                     let deadline = self
                         .shutdown_deadline
                         .map(|deadline| deadline.saturating_duration_since(Instant::now()));
@@ -168,8 +204,8 @@ impl DeliveryWorker {
 
     async fn handle_message(&mut self, message: WorkerMessage) {
         match message {
-            WorkerMessage::Enqueue(item) => {
-                self.queue.push_back(item);
+            WorkerMessage::Enqueue(work) => {
+                self.queue.push_back(work);
                 self.ledger
                     .note_delivery_state(
                         if self.degraded { "degraded" } else { "healthy" },
@@ -186,9 +222,39 @@ impl DeliveryWorker {
         }
     }
 
-    async fn process_item(&mut self, item: QueueItem) -> std::result::Result<(), String> {
-        match item {
-            QueueItem::CreateContext => match self.client.create_context().await {
+    async fn process_item(&mut self, work: QueuedWork) -> std::result::Result<(), String> {
+        // P3.3 + P3.4: open a `http.client.request` client-kind span as a
+        // child of the enqueue-time parent context (never attached with
+        // a guard — `ContextGuard` is not `Send` and cannot cross
+        // `.await` in a `tokio::spawn`'d future). Instead we thread
+        // the span's `Context` explicitly through the HTTP client.
+        //
+        // `retry.count` starts at 0 on the first attempt and increments
+        // on each subsequent enter (see `run`'s Err branch).
+        let tracer = global::tracer("cxtx");
+        let mut builder = tracer
+            .span_builder("http.client.request")
+            .with_kind(SpanKind::Client);
+        let op_name = match &work.item {
+            QueueItem::CreateContext => "create_context",
+            QueueItem::Append(_) => "append_turn",
+        };
+        builder.attributes = Some(vec![
+            KeyValue::new("cxtx.op", op_name.to_string()),
+            KeyValue::new("retry.count", self.retry_count as i64),
+        ]);
+        let span = tracer.build_with_context(builder, &work.parent_context);
+        // Compose the retry span into a Context we pass explicitly to
+        // `*_with_context` HTTP helpers so the injected `traceparent`
+        // names this span as the immediate parent.
+        let retry_cx = OtelContext::current_with_span(span);
+
+        let result = match work.item {
+            QueueItem::CreateContext => match self
+                .client
+                .create_context_with_context(&retry_cx)
+                .await
+            {
                 Ok(context_id) => {
                     self.context_id = Some(context_id);
                     self.ledger.note_context_created(context_id).await.ok();
@@ -200,7 +266,11 @@ impl DeliveryWorker {
                 let context_id = self
                     .context_id
                     .ok_or_else(|| "context creation has not completed".to_string())?;
-                match self.client.append_turn(context_id, &turn.item).await {
+                match self
+                    .client
+                    .append_turn_with_context(context_id, &turn.item, &retry_cx)
+                    .await
+                {
                     Ok(_) => {
                         self.ledger.note_append_sequence(turn.ordinal).await.ok();
                         Ok(())
@@ -208,7 +278,12 @@ impl DeliveryWorker {
                     Err(err) => Err(error_string(err)),
                 }
             }
-        }
+        };
+
+        // Drop retry_cx (and thus the span) here so the span ends
+        // before the next retry starts a new child span.
+        drop(retry_cx);
+        result
     }
 
     async fn enter_degraded(&mut self, error: &str) {
@@ -223,9 +298,12 @@ impl DeliveryWorker {
 
         self.degraded = true;
         self.recovery_turn_enqueued = false;
-        self.queue.push_back(QueueItem::Append(
-            self.session.ingest_degraded_turn(self.queue.len(), error),
-        ));
+        self.queue.push_back(QueuedWork {
+            item: QueueItem::Append(
+                self.session.ingest_degraded_turn(self.queue.len(), error),
+            ),
+            parent_context: OtelContext::current(),
+        });
         eprintln!("cxtx: CXDB ingest unavailable, entering queued-delivery mode");
     }
 

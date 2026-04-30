@@ -1,0 +1,8 @@
+{
+  "id": "chatcmpl-placeholder",
+  "object": "chat.completion.chunk",
+  "model": "gpt-placeholder",
+  "choices": [
+    {"index": 0, "delta": {}, "finish_reason": "stop"}
+  ]
+}

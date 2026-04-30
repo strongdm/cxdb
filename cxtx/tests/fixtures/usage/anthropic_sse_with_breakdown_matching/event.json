@@ -1,0 +1,14 @@
+{
+  "type": "message_delta",
+  "delta": {"stop_reason": "end_turn"},
+  "usage": {
+    "input_tokens": 6000,
+    "output_tokens": 14,
+    "cache_read_input_tokens": 100,
+    "cache_creation_input_tokens": 800,
+    "cache_creation": {
+      "ephemeral_5m_input_tokens": 300,
+      "ephemeral_1h_input_tokens": 500
+    }
+  }
+}

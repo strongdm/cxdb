@@ -1,0 +1,15 @@
+{
+  "type": "response.completed",
+  "response": {
+    "id": "resp_placeholder",
+    "model": "gpt-placeholder",
+    "status": "completed",
+    "output": [
+      {"type": "function_call", "id": "call_1", "call_id": "call_1", "name": "lookup", "arguments": "{\"q\":\"ok\"}"}
+    ],
+    "usage": {
+      "input_tokens": 110,
+      "output_tokens": 20
+    }
+  }
+}
