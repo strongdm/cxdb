@@ -310,6 +310,13 @@ fn common_prefix_len(left: &[HistoryItem], right: &[HistoryItem]) -> usize {
 }
 
 fn normalize_history_item(item: &HistoryItem) -> HistoryItem {
+    // Invariant: the per-exchange OTEL `CallContext` is NOT
+    // part of `HistoryItem` and therefore does NOT participate in this
+    // normalization. Two turns with different `CallContext.t_start` but
+    // identical semantic conversation content MUST dedup to one stored
+    // turn. See `assistant_turn_dedup_ignores_usage_outcome` in this
+    // file and `p3_t1_replay_dedup_ignores_call_context` in
+    // `cxtx/tests/otel_emit.rs`.
     match item {
         HistoryItem::AssistantTurn {
             text, tool_calls, ..
@@ -318,8 +325,73 @@ fn normalize_history_item(item: &HistoryItem) -> HistoryItem {
             tool_calls: tool_calls.clone(),
             model: None,
             finish_reason: None,
+            // Usage metadata is strictly less semantic than the finish
+            // reason (which is itself intentionally excluded); strip it
+            // so replay-suppression stays content-addressable.
+            usage: None,
         },
         _ => item.clone(),
+    }
+}
+
+/// Smoke helper used by tests to lock in the invariant that the
+/// normalization function strips every field OTEL emit adds to the
+/// per-exchange telemetry surface. Deliberately test-only — production
+/// paths should call `normalize_history_item` directly.
+#[cfg(test)]
+pub(crate) fn assert_dedup_ignores_telemetry(item: &HistoryItem) {
+    _assert_dedup_ignores_telemetry(item)
+}
+
+/// P3.5: public test hook asserting that adding
+/// queue-side `parent_context` / `retry.count` / `CallContext` state
+/// to the delivery pipeline does NOT change replay normalization. The
+/// field list lives entirely outside `HistoryItem`, so this function
+/// exists mostly as a pinned invariant — it re-runs the existing
+/// telemetry-stripping assertion on its input and serves as a
+/// reference for future sprints that might be tempted to leak
+/// queue-side fields into `HistoryItem`.
+#[cfg(test)]
+pub(crate) fn assert_queue_context_ignored_in_replay_hash(item: &HistoryItem) {
+    // Queue-side fields (parent_context, retry.count, CallContext)
+    // never appear inside HistoryItem; the only thing to verify is
+    // that the normalizer still strips the telemetry
+    // surface (which was the foothold the queue-side fields could
+    // have leaked through).
+    _assert_dedup_ignores_telemetry(item);
+}
+
+#[cfg(test)]
+fn _assert_dedup_ignores_telemetry(item: &HistoryItem) {
+    match item {
+        HistoryItem::AssistantTurn {
+            model,
+            finish_reason,
+            usage,
+            ..
+        } => {
+            // The stored (non-normalized) input may carry any of these;
+            // the normalized copy must shed them all.
+            let normalized = normalize_history_item(item);
+            if let HistoryItem::AssistantTurn {
+                model: nm,
+                finish_reason: nf,
+                usage: nu,
+                ..
+            } = &normalized
+            {
+                assert!(nm.is_none(), "model must be dropped; was {model:?}");
+                assert!(
+                    nf.is_none(),
+                    "finish_reason must be dropped; was {finish_reason:?}"
+                );
+                assert!(nu.is_none(), "usage must be dropped; was {usage:?}");
+            }
+        }
+        _ => {
+            // Non-assistant items are passed through verbatim; nothing to
+            // assert here.
+        }
     }
 }
 
@@ -399,6 +471,7 @@ mod tests {
                 }],
                 model: Some("claude-3-7-sonnet-20250219".to_string()),
                 finish_reason: Some("tool_use".to_string()),
+                usage: None,
             },
         );
         assert_eq!(appended.item.item_type, "assistant_turn");
@@ -419,6 +492,7 @@ mod tests {
                     }],
                     model: None,
                     finish_reason: None,
+                    usage: None,
                 },
                 HistoryItem::ToolResult {
                     call_id: "call_1".to_string(),
@@ -431,5 +505,229 @@ mod tests {
 
         assert_eq!(replay.len(), 1);
         assert_eq!(replay[0].item.item_type, "tool_result");
+    }
+
+    /// P3.5 / P3-T5: replay dedup is unaffected by the
+    /// queue-side OTEL context additions. Same semantic assistant
+    /// turn observed twice (first stamped with a fresh turn, then
+    /// replayed identically) must dedup to ONE turn — not two —
+    /// regardless of what `parent_context` / `retry.count` the
+    /// delivery layer wraps around it, because those fields live
+    /// alongside the payload and not inside `HistoryItem`.
+    #[test]
+    fn p3_t5_queue_context_does_not_perturb_replay_dedup() {
+        use crate::provider::usage::{RawUsage, UsageOutcome};
+
+        let session =
+            SessionRuntime::new(ProviderKind::Claude, Vec::new(), BTreeMap::new()).unwrap();
+
+        // First observation
+        let first = session.observe_request_history(
+            "exchange-0001",
+            vec![
+                HistoryItem::UserInput {
+                    text: "hi".to_string(),
+                    files: Vec::new(),
+                },
+                HistoryItem::AssistantTurn {
+                    text: "hello".to_string(),
+                    tool_calls: Vec::new(),
+                    model: Some("claude-opus".to_string()),
+                    finish_reason: Some("end_turn".to_string()),
+                    usage: Some(UsageOutcome::Reported(RawUsage {
+                        input_tokens: 1,
+                        output_tokens: 1,
+                        ..RawUsage::default()
+                    })),
+                },
+            ],
+            &ArtifactRefs::default(),
+        );
+        assert_eq!(first.len(), 2, "first exchange stores 2 turns");
+
+        // Second observation with SAME semantic content; the delivery
+        // layer would wrap each of these in a QueuedWork with a different
+        // parent_context, different retry.count, etc. — but that's
+        // strictly outside HistoryItem.
+        let replay = session.observe_request_history(
+            "exchange-0002",
+            vec![
+                HistoryItem::UserInput {
+                    text: "hi".to_string(),
+                    files: Vec::new(),
+                },
+                HistoryItem::AssistantTurn {
+                    text: "hello".to_string(),
+                    tool_calls: Vec::new(),
+                    // Different telemetry on the replay (would come
+                    // from a different exchange's provider response)
+                    model: Some("claude-opus-different".to_string()),
+                    finish_reason: Some("stop".to_string()),
+                    usage: Some(UsageOutcome::NotReported {
+                        partial: RawUsage::default(),
+                    }),
+                },
+            ],
+            &ArtifactRefs::default(),
+        );
+        assert!(
+            replay.is_empty(),
+            "identical semantic turn must dedup regardless of queue-side OTEL context; got {:?}",
+            replay.iter().map(|t| &t.item.item_type).collect::<Vec<_>>()
+        );
+
+        // And the public assertion hook is callable.
+        let item = HistoryItem::AssistantTurn {
+            text: "hello".to_string(),
+            tool_calls: Vec::new(),
+            model: Some("claude-opus".to_string()),
+            finish_reason: Some("end_turn".to_string()),
+            usage: None,
+        };
+        super::assert_queue_context_ignored_in_replay_hash(&item);
+    }
+
+    /// P3.4: explicit assertion that the normalization helper strips
+    /// the telemetry surface OTEL emit adds. Run against a fully-
+    /// populated assistant turn that would otherwise leak into the
+    /// dedup hash.
+    #[test]
+    fn normalize_assistant_turn_drops_telemetry_fields() {
+        use crate::provider::usage::{RawUsage, UsageOutcome};
+        let item = HistoryItem::AssistantTurn {
+            text: "hi".to_string(),
+            tool_calls: Vec::new(),
+            model: Some("claude".to_string()),
+            finish_reason: Some("end_turn".to_string()),
+            usage: Some(UsageOutcome::Reported(RawUsage::default())),
+        };
+        super::assert_dedup_ignores_telemetry(&item);
+    }
+
+    /// P3-T3: replay dedup regression — same assistant turn with and
+    /// without usage must dedup to ONE stored turn. Usage metadata must
+    /// NEVER participate in the normalization hash.
+    #[test]
+    fn assistant_turn_dedup_ignores_usage_outcome() {
+        use crate::provider::usage::{RawUsage, UsageOutcome};
+
+        let session =
+            SessionRuntime::new(ProviderKind::Claude, Vec::new(), BTreeMap::new()).unwrap();
+        let _ = session.observe_request_history(
+            "exchange-0001",
+            vec![HistoryItem::UserInput {
+                text: "hello".to_string(),
+                files: Vec::new(),
+            }],
+            &ArtifactRefs::default(),
+        );
+
+        let usage_reported = UsageOutcome::Reported(RawUsage {
+            input_tokens: 10,
+            output_tokens: 4,
+            ..RawUsage::default()
+        });
+        let appended = session.append_history_item(
+            "exchange-0001",
+            HistoryItem::AssistantTurn {
+                text: "hi".to_string(),
+                tool_calls: Vec::new(),
+                model: Some("claude-opus".to_string()),
+                finish_reason: Some("end_turn".to_string()),
+                usage: Some(usage_reported),
+            },
+        );
+        assert_eq!(appended.item.item_type, "assistant_turn");
+
+        // Replay the same assistant turn with a DIFFERENT usage outcome
+        // (NotReported). The normalization hash must still match, so the
+        // dedup prefix absorbs it — no new turn is appended.
+        let replay = session.observe_request_history(
+            "exchange-0002",
+            vec![
+                HistoryItem::UserInput {
+                    text: "hello".to_string(),
+                    files: Vec::new(),
+                },
+                HistoryItem::AssistantTurn {
+                    text: "hi".to_string(),
+                    tool_calls: Vec::new(),
+                    model: None,
+                    finish_reason: None,
+                    usage: Some(UsageOutcome::NotReported {
+                        partial: RawUsage::default(),
+                    }),
+                },
+            ],
+            &ArtifactRefs::default(),
+        );
+
+        assert!(
+            replay.is_empty(),
+            "usage-bearing and usage-missing twin must dedup to one turn; got {:?}",
+            replay
+                .iter()
+                .map(|t| &t.item.item_type)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// P4.4: replay dedup is unaffected by the new
+    /// `ContextMetadata.tenant` field. Tenant lives on
+    /// `ContextMetadata` (stamped on the FIRST turn only) and is NOT a
+    /// participant in `HistoryItem` equality.
+    #[test]
+    fn tenant_does_not_perturb_replay_dedup() {
+        use crate::test_sync::env_lock;
+
+        // Two semantically identical AssistantTurns MUST compare equal —
+        // there's no tenant field on HistoryItem, and tenant lives on
+        // session-level metadata instead.
+        let a = HistoryItem::AssistantTurn {
+            text: "hello".to_string(),
+            tool_calls: Vec::new(),
+            model: Some("claude".to_string()),
+            finish_reason: Some("end_turn".to_string()),
+            usage: None,
+        };
+        let b = HistoryItem::AssistantTurn {
+            text: "hello".to_string(),
+            tool_calls: Vec::new(),
+            model: Some("claude".to_string()),
+            finish_reason: Some("end_turn".to_string()),
+            usage: None,
+        };
+        assert_eq!(a, b);
+
+        // Drive the full dedup path with a session that reads
+        // CXTX_TENANT — hold the env-lock so other tests that mutate
+        // the same var (turns::tests) don't race.
+        let _guard = env_lock();
+        std::env::set_var("CXTX_TENANT", "tenant-x");
+        let session_x =
+            SessionRuntime::new(ProviderKind::Claude, Vec::new(), BTreeMap::new()).unwrap();
+        let first = session_x.observe_request_history(
+            "exchange-0001",
+            vec![HistoryItem::UserInput {
+                text: "hi".to_string(),
+                files: Vec::new(),
+            }],
+            &ArtifactRefs::default(),
+        );
+        assert_eq!(first.len(), 1);
+        let replay = session_x.observe_request_history(
+            "exchange-0002",
+            vec![HistoryItem::UserInput {
+                text: "hi".to_string(),
+                files: Vec::new(),
+            }],
+            &ArtifactRefs::default(),
+        );
+        assert!(
+            replay.is_empty(),
+            "tenant-present replay must dedup identically to baseline"
+        );
+
+        std::env::remove_var("CXTX_TENANT");
     }
 }

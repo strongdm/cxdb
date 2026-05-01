@@ -1,0 +1,9 @@
+{
+  "kind": "synthetic_aborted",
+  "outcome": {
+    "Error": {
+      "class": "StreamAborted",
+      "detail": "connection dropped before message_delta"
+    }
+  }
+}

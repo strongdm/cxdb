@@ -1,0 +1,15 @@
+{
+  "kind": "openai_responses_completed",
+  "outcome": {
+    "Reported": {
+      "input_tokens": 110,
+      "output_tokens": 20,
+      "cached_tokens": 0,
+      "reasoning_tokens": 0,
+      "cache_creation_total": 0,
+      "cache_creation_5m": 0,
+      "cache_creation_1h": 0,
+      "finish_reasons_raw": ["tool_use"]
+    }
+  }
+}

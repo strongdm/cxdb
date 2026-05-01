@@ -1,0 +1,15 @@
+{
+  "id": "chatcmpl-placeholder",
+  "object": "chat.completion",
+  "model": "gpt-placeholder",
+  "choices": [
+    {"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}
+  ],
+  "usage": {
+    "prompt_tokens": 50,
+    "completion_tokens": 15,
+    "total_tokens": 65,
+    "prompt_tokens_details": {"cached_tokens": 10},
+    "completion_tokens_details": {"reasoning_tokens": 3}
+  }
+}

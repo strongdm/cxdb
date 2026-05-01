@@ -17,6 +17,7 @@ impl ConversationItem {
                 title: String::new(),
                 labels: Vec::new(),
                 custom: std::collections::HashMap::new(),
+                tenant: None,
                 provenance: None,
             });
         }
@@ -123,6 +124,7 @@ impl AssistantTurnBuilder {
                 reasoning_tokens: None,
                 duration_ms: None,
                 model: String::new(),
+                usage_status: None,
             });
         }
         self

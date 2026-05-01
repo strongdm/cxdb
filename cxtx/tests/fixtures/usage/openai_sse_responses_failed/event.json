@@ -1,0 +1,13 @@
+{
+  "type": "response.completed",
+  "response": {
+    "id": "resp_placeholder",
+    "model": "gpt-placeholder",
+    "status": "failed",
+    "error": {"code": "server_error", "message": "placeholder"},
+    "usage": {
+      "input_tokens": 12,
+      "output_tokens": 0
+    }
+  }
+}

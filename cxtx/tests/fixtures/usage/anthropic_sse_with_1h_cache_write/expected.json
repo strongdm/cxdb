@@ -1,0 +1,15 @@
+{
+  "kind": "anthropic_sse_message_delta",
+  "outcome": {
+    "Reported": {
+      "input_tokens": 4000,
+      "output_tokens": 22,
+      "cached_tokens": 0,
+      "reasoning_tokens": 0,
+      "cache_creation_total": 1200,
+      "cache_creation_5m": 0,
+      "cache_creation_1h": 1200,
+      "finish_reasons_raw": ["end_turn"]
+    }
+  }
+}

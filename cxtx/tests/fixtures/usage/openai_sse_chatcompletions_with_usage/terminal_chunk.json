@@ -1,0 +1,13 @@
+{
+  "id": "chatcmpl-placeholder",
+  "object": "chat.completion.chunk",
+  "model": "gpt-placeholder",
+  "choices": [],
+  "usage": {
+    "prompt_tokens": 150,
+    "completion_tokens": 60,
+    "total_tokens": 210,
+    "prompt_tokens_details": {"cached_tokens": 40},
+    "completion_tokens_details": {"reasoning_tokens": 10}
+  }
+}

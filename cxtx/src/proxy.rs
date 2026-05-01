@@ -468,13 +468,18 @@ async fn stream_response(
                     }
                 }
                 Err(err) => {
+                    let detail = format!("failed to read upstream stream: {err}");
                     delivery.enqueue_turn(session.provider_error_turn(
                         &exchange_id,
                         "stream_transport_error",
-                        &format!("failed to read upstream stream: {err}"),
+                        &detail,
                         request_id_for_stream.as_deref(),
                         &stream_artifact_refs,
                     )).await.ok();
+                    // Tag the exchange so finalize_stream emits
+                    // OTEL `Error(StreamAborted)` instead of routing through
+                    // the happy path on the surviving 2xx upstream status.
+                    exchange_state.mark_stream_aborted(detail);
                     let _ = tx
                         .send(Err(std::io::Error::other(err.to_string())))
                         .await;
@@ -850,7 +855,7 @@ fn map_upstream_message(message: UpstreamWsMessage) -> Option<DownstreamWsMessag
 }
 
 #[derive(Debug)]
-struct WebsocketCapture {
+pub struct WebsocketCapture {
     provider: ProviderKind,
     exchange_id: String,
     request_id: Option<String>,
@@ -859,7 +864,7 @@ struct WebsocketCapture {
 }
 
 impl WebsocketCapture {
-    fn new(
+    pub fn new(
         provider: ProviderKind,
         exchange_id: String,
         request_id: Option<String>,
@@ -896,6 +901,27 @@ impl WebsocketCapture {
         self.observe_upstream_text(session, text.as_str())
     }
 
+    /// Public alias for integration tests that exercise the WS capture
+    /// surface from outside the crate. The underlying implementation is
+    /// `observe_downstream_text` — kept private to prevent accidental
+    /// use on production flows where the websocket frame plumbing owns
+    /// the entry point.
+    pub fn observe_downstream_text_for_test(
+        &mut self,
+        session: &SessionRuntime,
+        text: &str,
+    ) -> Vec<crate::turns::TurnEnvelope> {
+        self.observe_downstream_text(session, text)
+    }
+
+    pub fn observe_upstream_text_for_test(
+        &mut self,
+        session: &SessionRuntime,
+        text: &str,
+    ) -> Vec<crate::turns::TurnEnvelope> {
+        self.observe_upstream_text(session, text)
+    }
+
     fn observe_downstream_text(
         &mut self,
         session: &SessionRuntime,
@@ -919,7 +945,12 @@ impl WebsocketCapture {
             &self.artifact_refs,
         );
         turns.extend(prepared.request_turns);
-        self.current_state = Some(prepared.state);
+        // WS relay path: breadcrumb-only per spec. Drop the per-exchange
+        // OTEL plumbing so the shared finalize body does NOT emit a
+        // `chat <model>` span or `gen_ai.client.token.usage` sample.
+        let mut state = prepared.state;
+        state.clear_call_context();
+        self.current_state = Some(state);
         turns
     }
 
@@ -953,6 +984,42 @@ impl WebsocketCapture {
         let Some(state) = self.current_state.take() else {
             return Vec::new();
         };
+
+        // Breadcrumb emit — one `gen_ai.usage_missing{reason=not_reported}`
+        // per completed WS exchange. Per spec §"WebSocket provider path"
+        // we always tag `gen_ai.system=openai` for the WS relay (Codex is
+        // the only path that opens WS upgrades in cxtx today). Read the
+        // model from the parsed state; fall back to `unknown_ws_exchange`
+        // when `response.create` was never observed.
+        let request_model = match &state {
+            crate::provider::ExchangeState::OpenAi(s) => s
+                .model
+                .clone()
+                .unwrap_or_else(|| "unknown_ws_exchange".to_string()),
+            crate::provider::ExchangeState::Anthropic(s) => s
+                .model
+                .clone()
+                .unwrap_or_else(|| "unknown_ws_exchange".to_string()),
+        };
+        let mut attrs = cxdb_otel::gen_ai::Attrs::new()
+            .with("gen_ai.system", "openai")
+            .with("gen_ai.response.model", request_model)
+            .with("app.client_tag", session.provider().client_tag())
+            .with("reason", "not_reported");
+        // Tenant: WS breadcrumb threads `app.tenant` from the
+        // session's `ContextMetadata` when present. Missing tenant
+        // (`None` or empty) means no attribute — no sentinel, no empty
+        // string.
+        if let Some(tenant) = session
+            .metadata()
+            .tenant
+            .as_deref()
+            .filter(|s| !s.is_empty())
+        {
+            attrs = attrs.with("app.tenant", tenant.to_string());
+        }
+        cxdb_otel::gen_ai::emit_usage_missing(&attrs);
+
         state.finalize_stream(
             session,
             200,

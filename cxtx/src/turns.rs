@@ -3,18 +3,18 @@ use cxdb::types::{
     attach_provenance, build_assistant_turn, build_system, build_tool_call_item, build_tool_result,
     capture_process_provenance, new_user_input, with_env_vars, with_on_behalf_of, with_sdk,
     ContextMetadata, ConversationItem, SystemKindError, SystemKindInfo, SystemKindRewind,
-    ToolCallStatusPending,
+    ToolCallStatusPending, TurnMetrics,
 };
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
 
-use crate::provider::ProviderKind;
+use crate::provider::{ProviderKind, UsageOutcome};
 use crate::session::CapturedSession;
 
 pub const WRAPPER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum HistoryItem {
     UserInput {
         text: String,
@@ -25,6 +25,11 @@ pub enum HistoryItem {
         tool_calls: Vec<ToolCallRecord>,
         model: Option<String>,
         finish_reason: Option<String>,
+        /// Typed parse state from the provider finalize path. Not a
+        /// participant in equality / hashing / replay-dedup — the
+        /// normalization helper in `session.rs` strips this before
+        /// comparing.
+        usage: Option<UsageOutcome>,
     },
     ToolResult {
         call_id: String,
@@ -32,6 +37,54 @@ pub enum HistoryItem {
         is_error: bool,
     },
 }
+
+impl PartialEq for HistoryItem {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                HistoryItem::UserInput {
+                    text: a_text,
+                    files: a_files,
+                },
+                HistoryItem::UserInput {
+                    text: b_text,
+                    files: b_files,
+                },
+            ) => a_text == b_text && a_files == b_files,
+            (
+                HistoryItem::AssistantTurn {
+                    text: a_text,
+                    tool_calls: a_tc,
+                    model: a_m,
+                    finish_reason: a_fr,
+                    usage: _,
+                },
+                HistoryItem::AssistantTurn {
+                    text: b_text,
+                    tool_calls: b_tc,
+                    model: b_m,
+                    finish_reason: b_fr,
+                    usage: _,
+                },
+            ) => a_text == b_text && a_tc == b_tc && a_m == b_m && a_fr == b_fr,
+            (
+                HistoryItem::ToolResult {
+                    call_id: a_id,
+                    content: a_c,
+                    is_error: a_e,
+                },
+                HistoryItem::ToolResult {
+                    call_id: b_id,
+                    content: b_c,
+                    is_error: b_e,
+                },
+            ) => a_id == b_id && a_c == b_c && a_e == b_e,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for HistoryItem {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ToolCallRecord {
@@ -101,6 +154,11 @@ pub fn context_metadata(
         ],
     );
 
+    // Decision: read `CXTX_TENANT` exactly once at
+    // session construction. Empty string → None (no sentinel, no
+    // empty-string stamp). Unset also → None.
+    let tenant = std::env::var("CXTX_TENANT").ok().filter(|s| !s.is_empty());
+
     let mut metadata = ContextMetadata {
         client_tag: provider.client_tag().to_string(),
         title: format!(
@@ -111,6 +169,7 @@ pub fn context_metadata(
         ),
         labels: provider.labels(),
         custom,
+        tenant,
         provenance: None,
     };
     attach_provenance(&mut metadata, provenance);
@@ -260,6 +319,7 @@ pub fn history_item_to_conversation_item(
             tool_calls,
             model,
             finish_reason,
+            usage,
         } => {
             let mut builder = build_assistant_turn(text.clone());
             for tool_call in tool_calls {
@@ -275,16 +335,15 @@ pub fn history_item_to_conversation_item(
             if let Some(reason) = finish_reason.as_ref().filter(|reason| !reason.is_empty()) {
                 builder.with_finish_reason(reason.clone());
             }
-            if let Some(model) = model.as_ref().filter(|model| !model.is_empty()) {
-                builder.with_full_metrics(cxdb::types::TurnMetrics {
-                    input_tokens: 0,
-                    output_tokens: 0,
-                    total_tokens: 0,
-                    cached_tokens: None,
-                    reasoning_tokens: None,
-                    duration_ms: None,
-                    model: model.clone(),
-                });
+
+            let model_str = model
+                .as_ref()
+                .filter(|model| !model.is_empty())
+                .cloned()
+                .unwrap_or_default();
+            let metrics = metrics_from_usage(usage.as_ref(), model_str);
+            if let Some(metrics) = metrics {
+                builder.with_full_metrics(metrics);
             }
             builder.with_id(id);
             builder.build()
@@ -311,6 +370,39 @@ pub fn tool_call_record(call_id: String, name: String, args: String) -> ToolCall
         name,
         args,
     }
+}
+
+/// Translate a `UsageOutcome` into stored `TurnMetrics`. Returns `None` when
+/// there is nothing worth stamping (no usage, no model) — keeps pre-sprint
+/// behavior for legacy code paths that never saw a usage object.
+fn metrics_from_usage(usage: Option<&UsageOutcome>, model: String) -> Option<TurnMetrics> {
+    let status = usage.and_then(UsageOutcome::status_tag);
+    let raw = usage.map(UsageOutcome::raw_for_metrics).unwrap_or_default();
+
+    let input_tokens = raw.input_tokens as i64;
+    let output_tokens = raw.output_tokens as i64;
+    let total_tokens = input_tokens.saturating_add(output_tokens);
+    let cached_tokens = (raw.cached_tokens > 0).then_some(raw.cached_tokens as i64);
+    let reasoning_tokens = (raw.reasoning_tokens > 0).then_some(raw.reasoning_tokens as i64);
+
+    // Legacy behavior: if neither usage was reported nor a model is known,
+    // don't stamp anything. This preserves the pre-sprint contract where
+    // model-less legacy paths (e.g., Responses API without parsed model)
+    // leave `metrics = None`.
+    if usage.is_none() && model.is_empty() {
+        return None;
+    }
+
+    Some(TurnMetrics {
+        input_tokens,
+        output_tokens,
+        total_tokens,
+        cached_tokens,
+        reasoning_tokens,
+        duration_ms: None,
+        model,
+        usage_status: status,
+    })
 }
 
 pub fn preview_text(text: &str, limit: usize) -> String {
@@ -349,4 +441,66 @@ fn system_item(
 fn pretty_json(value: Value) -> String {
     serde_json::to_string_pretty(&value)
         .unwrap_or_else(|_| "{\"message\":\"failed to encode system payload\"}".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::provider::ProviderKind;
+    use crate::session::CapturedSession;
+    use crate::test_sync::env_lock;
+    use chrono::Utc;
+
+    fn sample_session() -> CapturedSession {
+        CapturedSession {
+            session_id: "sess-test".to_string(),
+            provider_kind: ProviderKind::Claude.provider_name().to_string(),
+            child_command: "claude".to_string(),
+            child_args: Vec::new(),
+            started_at: Utc::now(),
+        }
+    }
+
+    /// P1-T4 (happy): a non-empty `CXTX_TENANT` threads into
+    /// `ContextMetadata.tenant`.
+    #[test]
+    fn cxtx_tenant_env_read_populates_metadata_when_set() {
+        let _guard = env_lock();
+        std::env::set_var("CXTX_TENANT", "tenant-test-happy");
+        let meta = context_metadata(
+            ProviderKind::Claude,
+            &sample_session(),
+            &std::collections::BTreeMap::new(),
+        );
+        assert_eq!(meta.tenant.as_deref(), Some("tenant-test-happy"));
+        std::env::remove_var("CXTX_TENANT");
+    }
+
+    /// P1-T4 (absent): unset `CXTX_TENANT` yields `tenant = None`.
+    #[test]
+    fn cxtx_tenant_env_read_yields_none_when_unset() {
+        let _guard = env_lock();
+        std::env::remove_var("CXTX_TENANT");
+        let meta = context_metadata(
+            ProviderKind::Claude,
+            &sample_session(),
+            &std::collections::BTreeMap::new(),
+        );
+        assert_eq!(meta.tenant, None);
+    }
+
+    /// P1-T4 (empty): empty string is treated identically to
+    /// unset — no sentinel, no empty-string stamp.
+    #[test]
+    fn cxtx_tenant_env_read_yields_none_when_empty() {
+        let _guard = env_lock();
+        std::env::set_var("CXTX_TENANT", "");
+        let meta = context_metadata(
+            ProviderKind::Claude,
+            &sample_session(),
+            &std::collections::BTreeMap::new(),
+        );
+        assert_eq!(meta.tenant, None);
+        std::env::remove_var("CXTX_TENANT");
+    }
 }

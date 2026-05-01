@@ -165,6 +165,13 @@ pub struct TurnMetrics {
     pub duration_ms: Option<i64>,
     #[serde(rename = "7", skip_serializing_if = "String::is_empty")]
     pub model: String,
+    /// Diagnostic tag for non-happy-path usage parses. `None` for the
+    /// happy `Reported` path; `Some("not_reported")` when the stream
+    /// finished cleanly with no usage object; `Some("error:<class>")`
+    /// when the finalize path classified the call as an upstream error.
+    /// Additive-only field — serde defaults to `None` for pre-existing records.
+    #[serde(rename = "8", default, skip_serializing_if = "Option::is_none")]
+    pub usage_status: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -247,6 +254,12 @@ pub struct ContextMetadata {
     pub labels: Vec<String>,
     #[serde(rename = "4", skip_serializing_if = "map_is_empty")]
     pub custom: std::collections::HashMap<String, String>,
+    /// Optional tenant label used for OTEL `app.tenant` attribution
+    /// (primary KPI = per-tenant LLM cost). When `None`, emit sites
+    /// MUST omit the attribute entirely — no sentinel, no empty string.
+    /// Wire tag 5 in both Rust and Go clients.
+    #[serde(default, rename = "5", skip_serializing_if = "Option::is_none")]
+    pub tenant: Option<String>,
     #[serde(rename = "10")]
     pub provenance: Option<super::provenance::Provenance>,
 }

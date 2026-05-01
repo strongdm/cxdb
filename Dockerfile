@@ -37,21 +37,24 @@ COPY Cargo.toml Cargo.lock* ./
 COPY server/Cargo.toml ./server/
 COPY clients/rust/Cargo.toml ./clients/rust/
 COPY cxtx/Cargo.toml ./cxtx/
+COPY cxdb-otel/Cargo.toml ./cxdb-otel/
 
 # Create dummy sources to build dependencies
-RUN mkdir -p server/src clients/rust/src cxtx/src && \
+RUN mkdir -p server/src clients/rust/src cxtx/src cxdb-otel/src && \
     echo "fn main() {}" > server/src/main.rs && \
     echo "pub fn dummy() {}" > clients/rust/src/lib.rs && \
     echo "pub fn dummy() {}" > cxtx/src/lib.rs && \
     echo "fn main() {}" > cxtx/src/main.rs && \
+    echo "pub fn dummy() {}" > cxdb-otel/src/lib.rs && \
     cargo build --release --manifest-path server/Cargo.toml && \
-    rm -rf server/src clients/rust/src cxtx/src
+    rm -rf server/src clients/rust/src cxtx/src cxdb-otel/src
 
 # Copy actual source and build
 COPY server/ ./server/
 COPY clients/ ./clients/
 COPY cxtx/ ./cxtx/
-RUN find server/src clients/rust/src cxtx/src -type f -exec touch {} + && \
+COPY cxdb-otel/ ./cxdb-otel/
+RUN find server/src clients/rust/src cxtx/src cxdb-otel/src -type f -exec touch {} + && \
     cargo build --release --manifest-path server/Cargo.toml
 
 # ============================================
