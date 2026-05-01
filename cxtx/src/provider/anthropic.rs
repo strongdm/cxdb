@@ -27,6 +27,13 @@ pub struct AnthropicExchange {
     /// from the current `SessionRuntime` metadata. Not part of the
     /// semantic `HistoryItem` surface — replay dedup ignores it.
     call_context: Option<CallContext>,
+    /// Set by `mark_stream_aborted` from the proxy when an upstream
+    /// transport error breaks the SSE read loop. `finalize_stream`
+    /// consults this BEFORE the status / parse-error checks so OTEL
+    /// classifies the call as `Error(StreamAborted)` rather than
+    /// `NotReported` (the original 200 response status survives the
+    /// abort and would otherwise route through the happy path).
+    stream_aborted: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -240,13 +247,52 @@ fn attach_usage_to_assistant(item: HistoryItem, outcome: Option<UsageOutcome>) -
 
 pub fn finalize_stream(
     session: &SessionRuntime,
-    exchange: AnthropicExchange,
+    mut exchange: AnthropicExchange,
     status: u16,
     request_id: Option<String>,
     artifact_refs: &ArtifactRefs,
     malformed_remainder: Option<String>,
 ) -> Vec<TurnEnvelope> {
     let call_context = exchange.call_context.clone();
+
+    // Highest-priority terminal classification: upstream transport abort.
+    // The proxy records the user-visible system turn separately, so here we
+    // only update OTEL + stamp the partial assistant turn (if any) with
+    // `Error(StreamAborted)`. Without this branch the call would route
+    // through the happy path because `status` is the upstream's original
+    // 2xx — the abort happens after headers are received.
+    if let Some(detail) = exchange.stream_aborted.take() {
+        let outcome = stream_aborted_outcome(detail);
+        if let Some(ctx) = call_context.as_ref() {
+            finalize_llm_call(ctx, &outcome, exchange.model.as_deref());
+        }
+        let mut blocks = exchange.blocks.into_iter().collect::<Vec<_>>();
+        blocks.sort_by_key(|(index, _)| *index);
+        if blocks.is_empty() {
+            return Vec::new();
+        }
+        let mut text = String::new();
+        let mut tool_calls = Vec::new();
+        for (_, block) in blocks {
+            match block {
+                PartialBlock::Text(value) => text.push_str(&value),
+                PartialBlock::ToolUse(tool) => {
+                    tool_calls.push(tool_call_record(tool.id, tool.name, tool.input_json))
+                }
+            }
+        }
+        return vec![session.append_history_item(
+            &exchange.exchange_id,
+            HistoryItem::AssistantTurn {
+                text,
+                tool_calls,
+                model: exchange.model,
+                finish_reason: exchange.finish_reason,
+                usage: Some(outcome),
+            },
+        )];
+    }
+
     if let Some(remainder) = malformed_remainder.filter(|remainder| !remainder.trim().is_empty()) {
         if let Some(ctx) = call_context.as_ref() {
             let outcome = UsageOutcome::Error {
@@ -382,7 +428,16 @@ impl AnthropicExchange {
             parse_errors: Vec::new(),
             usage: None,
             call_context,
+            stream_aborted: None,
         }
+    }
+
+    /// Record an upstream transport-abort detail. Called from the proxy
+    /// before `finalize_stream` so the OTEL pipeline emits
+    /// `Error(StreamAborted)` and the stored assistant turn's
+    /// `usage_status` carries the same class.
+    pub fn mark_stream_aborted(&mut self, detail: String) {
+        self.stream_aborted = Some(detail);
     }
 
     /// Current parsed usage, exposed for tests and Phase-3 integration glue.

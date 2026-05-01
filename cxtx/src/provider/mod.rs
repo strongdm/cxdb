@@ -307,6 +307,17 @@ impl ExchangeState {
         }
     }
 
+    /// Mark the underlying provider exchange as having lost its upstream
+    /// stream mid-flight. `finalize_stream` will then emit OTEL
+    /// `Error(StreamAborted)` rather than misclassifying the call as a
+    /// clean `NotReported` based on the surviving 2xx response status.
+    pub fn mark_stream_aborted(&mut self, detail: String) {
+        match self {
+            Self::OpenAi(state) => state.mark_stream_aborted(detail),
+            Self::Anthropic(state) => state.mark_stream_aborted(detail),
+        }
+    }
+
     pub fn finalize_stream(
         self,
         session: &SessionRuntime,

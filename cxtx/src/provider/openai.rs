@@ -43,6 +43,13 @@ pub struct OpenAiExchange {
     /// consumed by `finalize_json` / `finalize_stream`. Not part of
     /// `HistoryItem` — replay dedup ignores it.
     call_context: Option<CallContext>,
+    /// Set by `mark_stream_aborted` from the proxy when an upstream
+    /// transport error breaks the SSE read loop. `finalize_stream`
+    /// consults this BEFORE the status / parse-error checks so OTEL
+    /// classifies the call as `Error(StreamAborted)` rather than
+    /// `NotReported` (the original 200 response status survives the
+    /// abort and would otherwise route through the happy path).
+    stream_aborted: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -294,13 +301,45 @@ fn attach_usage_to_assistant(item: HistoryItem, outcome: Option<UsageOutcome>) -
 
 pub fn finalize_stream(
     session: &SessionRuntime,
-    exchange: OpenAiExchange,
+    mut exchange: OpenAiExchange,
     status: u16,
     request_id: Option<String>,
     artifact_refs: &ArtifactRefs,
     malformed_remainder: Option<String>,
 ) -> Vec<TurnEnvelope> {
     let call_context = exchange.call_context.clone();
+
+    // Highest-priority terminal classification: upstream transport abort.
+    // The proxy records the user-visible system turn separately, so here we
+    // only update OTEL + stamp the partial assistant turn (if any) with
+    // `Error(StreamAborted)`. Without this branch the call would route
+    // through the happy path because `status` is the upstream's original
+    // 2xx — the abort happens after headers are received.
+    if let Some(detail) = exchange.stream_aborted.take() {
+        let outcome = stream_aborted_outcome(detail);
+        if let Some(ctx) = call_context.as_ref() {
+            finalize_llm_call(ctx, &outcome, exchange.model.as_deref());
+        }
+        if exchange.content.is_empty() && exchange.tool_calls.is_empty() {
+            return Vec::new();
+        }
+        let tool_calls = exchange
+            .tool_calls
+            .into_iter()
+            .map(|tool| tool_call_record(tool.call_id, tool.name, tool.args))
+            .collect::<Vec<_>>();
+        return vec![session.append_history_item(
+            &exchange.exchange_id,
+            HistoryItem::AssistantTurn {
+                text: exchange.content,
+                tool_calls,
+                model: exchange.model,
+                finish_reason: exchange.finish_reason,
+                usage: Some(outcome),
+            },
+        )];
+    }
+
     if let Some(remainder) = malformed_remainder.filter(|remainder| !remainder.trim().is_empty()) {
         if let Some(ctx) = call_context.as_ref() {
             let outcome = UsageOutcome::Error {
@@ -443,7 +482,16 @@ impl OpenAiExchange {
             usage: None,
             finish_reasons_raw: Vec::new(),
             call_context,
+            stream_aborted: None,
         }
+    }
+
+    /// Record an upstream transport-abort detail. Called from the proxy
+    /// before `finalize_stream` so the OTEL pipeline emits
+    /// `Error(StreamAborted)` and the stored assistant turn's
+    /// `usage_status` carries the same class.
+    pub fn mark_stream_aborted(&mut self, detail: String) {
+        self.stream_aborted = Some(detail);
     }
 
     /// Current parsed usage, exposed for tests.
@@ -562,13 +610,18 @@ impl OpenAiExchange {
                     absorb_responses_output(response, &mut self.content, &mut self.tool_calls);
 
                     // Terminal event — harvest usage + derive raw finish reason.
+                    // The finish reason must be derived BEFORE the `usage` check
+                    // so the NotReported path (completed-without-usage) still
+                    // carries it forward via `finish_reasons_raw` — otherwise
+                    // `incomplete:length` / `failed:<code>` become indistinguishable
+                    // from a clean stop in OTEL.
                     if event_type == "response.completed" {
+                        let finish = responses_raw_finish_reason(response);
                         if let Some(usage) = response.get("usage") {
-                            let finish = responses_raw_finish_reason(response);
-                            self.usage = Some(openai_responses_usage_from_value(
-                                usage,
-                                vec![finish],
-                            ));
+                            self.usage =
+                                Some(openai_responses_usage_from_value(usage, vec![finish]));
+                        } else if !finish.is_empty() {
+                            self.finish_reasons_raw.push(finish);
                         }
                     }
                 }
@@ -1193,5 +1246,41 @@ mod tests {
         assert_eq!(exchange.content, "Hello world");
         assert_eq!(exchange.model.as_deref(), Some("gpt-5.4"));
         assert_eq!(exchange.finish_reason.as_deref(), Some("completed"));
+    }
+
+    #[test]
+    fn responses_completed_without_usage_preserves_finish_reason() {
+        let mut exchange =
+            OpenAiExchange::new("exchange-0001".to_string(), Some("gpt-5.4".to_string()));
+        exchange.absorb_sse_frame(&SseFrame {
+            event: Some("response.completed".to_string()),
+            data: "{\"type\":\"response.completed\",\"response\":{\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"},\"output\":[]}}".to_string(),
+            raw: String::new(),
+        });
+        assert!(
+            exchange.usage.is_none(),
+            "no usage object → exchange.usage stays None"
+        );
+        assert_eq!(
+            exchange.finish_reasons_raw,
+            vec!["incomplete:max_output_tokens".to_string()],
+            "canonical finish reason must flow into NotReported path"
+        );
+    }
+
+    #[test]
+    fn responses_completed_failed_without_usage_preserves_failure_code() {
+        let mut exchange =
+            OpenAiExchange::new("exchange-0001".to_string(), Some("gpt-5.4".to_string()));
+        exchange.absorb_sse_frame(&SseFrame {
+            event: Some("response.completed".to_string()),
+            data: "{\"type\":\"response.completed\",\"response\":{\"status\":\"failed\",\"error\":{\"code\":\"server_error\"},\"output\":[]}}".to_string(),
+            raw: String::new(),
+        });
+        assert!(exchange.usage.is_none());
+        assert_eq!(
+            exchange.finish_reasons_raw,
+            vec!["failed:server_error".to_string()]
+        );
     }
 }

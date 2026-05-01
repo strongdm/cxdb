@@ -468,13 +468,18 @@ async fn stream_response(
                     }
                 }
                 Err(err) => {
+                    let detail = format!("failed to read upstream stream: {err}");
                     delivery.enqueue_turn(session.provider_error_turn(
                         &exchange_id,
                         "stream_transport_error",
-                        &format!("failed to read upstream stream: {err}"),
+                        &detail,
                         request_id_for_stream.as_deref(),
                         &stream_artifact_refs,
                     )).await.ok();
+                    // Tag the exchange so finalize_stream emits
+                    // OTEL `Error(StreamAborted)` instead of routing through
+                    // the happy path on the surviving 2xx upstream status.
+                    exchange_state.mark_stream_aborted(detail);
                     let _ = tx
                         .send(Err(std::io::Error::other(err.to_string())))
                         .await;

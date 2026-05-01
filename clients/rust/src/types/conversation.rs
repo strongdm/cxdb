@@ -170,11 +170,7 @@ pub struct TurnMetrics {
     /// finished cleanly with no usage object; `Some("error:<class>")`
     /// when the finalize path classified the call as an upstream error.
     /// Additive-only field — serde defaults to `None` for pre-existing records.
-    #[serde(
-        rename = "8",
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(rename = "8", default, skip_serializing_if = "Option::is_none")]
     pub usage_status: Option<String>,
 }
 
