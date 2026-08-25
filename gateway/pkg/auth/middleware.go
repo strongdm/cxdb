@@ -18,6 +18,11 @@ type BearerTokenVerifier interface {
 	Verify(token string) (*Session, error)
 }
 
+// RequestTokenVerifier validates request-bound bearer token schemes like request-bound.
+type RequestTokenVerifier interface {
+	VerifyWithRequest(r *http.Request, token string) (*Session, error)
+}
+
 // Debug auth bypass configuration (set via environment variables)
 // DEBUG_AUTH_TOKEN: Static token for Authorization header (e.g., "Bearer debug-token-123")
 // DEBUG_AUTH_ALLOWED_IPS: Comma-separated list of allowed IPs (e.g., "107.131.127.143,10.0.0.1")
@@ -37,14 +42,13 @@ func parseAllowedIPs(s string) map[string]bool {
 	return ips
 }
 
+// getClientIP returns the TCP peer's address parsed from req.RemoteAddr.
+//
+// Sprint 019 / ADR-006: this function mirrors `proxy.observedPeerIP` and is
+// the sole source of real-client-IP truth in the auth package. It NEVER reads
+// `X-Forwarded-For` or `Forwarded` — those headers are attacker-controllable
+// and would let a client spoof the debug-auth IP allowlist check.
 func getClientIP(r *http.Request) string {
-	// Check X-Forwarded-For header (set by ALB/proxy)
-	xff := r.Header.Get("X-Forwarded-For")
-	if xff != "" {
-		parts := strings.Split(xff, ",")
-		return strings.TrimSpace(parts[0])
-	}
-	// Fall back to RemoteAddr
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr
@@ -74,11 +78,9 @@ func checkDebugAuth(r *http.Request) *Session {
 
 	log.Printf("[auth] debug auth bypass granted for IP %s", clientIP)
 	return &Session{
-		ID:        "debug-auth-session",
-		Email:     "debug@localhost",
-		Name:      "Debug Auth User",
-		CreatedAt: time.Now().UTC(),
-		ExpiresAt: time.Now().Add(24 * time.Hour).UTC(),
+		ID: "debug-auth-session", Email: "debug@localhost", Name: "Debug Auth User",
+		Scopes: []string{"cxdb:read", "cxdb:write"}, Issuer: "cxdb:debug", Subject: "debug",
+		CreatedAt: time.Now().UTC(), ExpiresAt: time.Now().Add(24 * time.Hour).UTC(), AuthMethod: "debug",
 	}
 }
 
@@ -90,8 +92,8 @@ type AuthMiddlewareOptions struct {
 }
 
 // RequireAuthForReads is an HTTP middleware that enforces a valid session for
-// all GET requests except explicitly whitelisted paths. Non-GET methods (writes)
-// are always allowed through without authentication.
+// all GET requests except explicitly whitelisted paths. A separate middleware
+// enforces authentication and scopes for non-GET methods.
 func RequireAuthForReads(store *SessionStore, next http.Handler, devBypass bool) http.Handler {
 	return RequireAuthForReadsWithOptions(AuthMiddlewareOptions{
 		Store:     store,
@@ -106,7 +108,7 @@ func RequireAuthForReadsWithOptions(opts AuthMiddlewareOptions, next http.Handle
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
 
-		// Always allow non-GET methods (anonymous writes)
+		// Non-GET methods are checked by RequireAuthForWrites.
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			if store.Debug() {
 				log.Printf("[auth] allowing write method %s %s", r.Method, path)
@@ -124,26 +126,23 @@ func RequireAuthForReadsWithOptions(opts AuthMiddlewareOptions, next http.Handle
 			return
 		}
 
-		sess, _ := store.SessionFromRequest(r.Context(), r)
-
-		// Try bearer token authentication (K8s OIDC, AWS IAM, etc.)
-		if sess == nil {
-			if token := extractBearerToken(r); token != "" {
-				for _, verifier := range opts.TokenVerifiers {
-					if s, err := verifier.Verify(token); err == nil && s != nil {
-						sess = s
-						if store.Debug() {
-							log.Printf("[auth] bearer token verified: %s", s.Email)
-						}
-						break
-					}
+		var sess *Session
+		if strings.TrimSpace(r.Header.Get("Authorization")) != "" {
+			sess = checkDebugAuth(r)
+			if sess == nil {
+				token := extractBearerToken(r)
+				if token == "" {
+					http.Error(w, "unsupported authorization scheme", http.StatusUnauthorized)
+					return
+				}
+				sess = verifyBearer(r, token, opts.TokenVerifiers)
+				if sess == nil {
+					http.Error(w, "invalid bearer token", http.StatusUnauthorized)
+					return
 				}
 			}
-		}
-
-		// Check for debug auth bypass (static token from allowed IP)
-		if sess == nil {
-			sess = checkDebugAuth(r)
+		} else {
+			sess, _ = store.SessionFromRequest(r.Context(), r)
 		}
 
 		// In DEV_MODE, allow requests without a browser session by
@@ -163,11 +162,9 @@ func RequireAuthForReadsWithOptions(opts AuthMiddlewareOptions, next http.Handle
 				name = "Dev Mode User"
 			}
 			sess = &Session{
-				ID:        "dev-mode-session",
-				Email:     email,
-				Name:      name,
-				CreatedAt: time.Now().UTC(),
-				ExpiresAt: time.Now().Add(store.TTL()).UTC(),
+				ID: "dev-mode-session", Email: email, Name: name,
+				Scopes: []string{"cxdb:read", "cxdb:write"}, Issuer: "cxdb:dev", Subject: email, AuthMethod: "dev",
+				CreatedAt: time.Now().UTC(), ExpiresAt: time.Now().Add(store.TTL()).UTC(),
 			}
 		}
 
@@ -186,6 +183,10 @@ func RequireAuthForReadsWithOptions(opts AuthMiddlewareOptions, next http.Handle
 			http.Redirect(w, r, "/login", http.StatusFound)
 			return
 		}
+		if !sess.HasScope("cxdb:read") {
+			http.Error(w, "insufficient scope: cxdb:read required", http.StatusForbidden)
+			return
+		}
 
 		if store.Debug() {
 			log.Printf("[auth] authorized %s as %s", path, sess.Email)
@@ -195,13 +196,97 @@ func RequireAuthForReadsWithOptions(opts AuthMiddlewareOptions, next http.Handle
 	})
 }
 
+// RequireAuthForWrites enforces authentication on mutating HTTP methods.
+// POST/PUT/PATCH/DELETE require a valid principal with the "cxdb:write"
+// scope. GET/HEAD/OPTIONS pass through to the read middleware.
+func RequireAuthForWrites(opts AuthMiddlewareOptions, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Read-only and preflight methods always pass through.
+		if r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodOptions {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// Allow only explicitly public write endpoints.
+		if isPublicWritePath(r.URL.Path) {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		var sess *Session
+		if strings.TrimSpace(r.Header.Get("Authorization")) != "" {
+			sess = checkDebugAuth(r)
+			if sess == nil {
+				token := extractBearerToken(r)
+				if token == "" {
+					http.Error(w, "unsupported authorization scheme", http.StatusUnauthorized)
+					return
+				}
+				sess = verifyBearer(r, token, opts.TokenVerifiers)
+				if sess == nil {
+					http.Error(w, "invalid bearer token", http.StatusUnauthorized)
+					return
+				}
+			}
+		} else {
+			sess, _ = opts.Store.SessionFromRequest(r.Context(), r)
+		}
+
+		// Dev mode bypass.
+		if sess == nil && opts.DevBypass {
+			email := strings.TrimSpace(os.Getenv("DEV_EMAIL"))
+			if email == "" {
+				email = "dev@localhost"
+			}
+			name := strings.TrimSpace(os.Getenv("DEV_NAME"))
+			if name == "" {
+				name = "Dev Mode User"
+			}
+			sess = &Session{
+				ID: "dev-mode-session", Email: email, Name: name,
+				Scopes: []string{"cxdb:read", "cxdb:write"}, Issuer: "cxdb:dev", Subject: email, AuthMethod: "dev",
+				CreatedAt: time.Now().UTC(), ExpiresAt: time.Now().Add(opts.Store.TTL()).UTC(),
+			}
+		}
+
+		if sess == nil {
+			http.Error(w, "authentication required for write operations", http.StatusUnauthorized)
+			return
+		}
+
+		if !sess.HasScope("cxdb:write") {
+			http.Error(w, "insufficient scope: cxdb:write required", http.StatusForbidden)
+			return
+		}
+
+		ctx := WithUser(r.Context(), sess)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
 // extractBearerToken extracts a bearer token from the Authorization header.
 func extractBearerToken(r *http.Request) string {
 	auth := r.Header.Get("Authorization")
 	if strings.HasPrefix(auth, "Bearer ") {
-		return strings.TrimPrefix(auth, "Bearer ")
+		return strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
 	}
 	return ""
+}
+
+func verifyBearer(r *http.Request, token string, verifiers []BearerTokenVerifier) *Session {
+	for _, verifier := range verifiers {
+		var session *Session
+		var err error
+		if requestVerifier, ok := verifier.(RequestTokenVerifier); ok {
+			session, err = requestVerifier.VerifyWithRequest(r, token)
+		} else {
+			session, err = verifier.Verify(token)
+		}
+		if err == nil && session != nil {
+			return session
+		}
+	}
+	return nil
 }
 
 // isAPIRequest returns true if the request appears to be an API request
@@ -223,6 +308,23 @@ func isAPIRequest(r *http.Request) bool {
 	return false
 }
 
+// isPublicWritePath returns true for endpoints that intentionally allow
+// unauthenticated write methods (POST/PUT/PATCH/DELETE).
+func isPublicWritePath(path string) bool {
+	path = strings.ToLower(path)
+
+	// Health checks may use POST from some probes.
+	if path == "/healthz" || path == "/readyz" {
+		return true
+	}
+
+	if path == "/auth/aws/token" || path == "/oauth/register" || path == "/oauth/token" || path == "/mcp" {
+		return true
+	}
+
+	return false
+}
+
 func isPublicPath(path string) bool {
 	path = strings.ToLower(path)
 
@@ -230,32 +332,23 @@ func isPublicPath(path string) bool {
 	if path == "/healthz" || path == "/readyz" || path == "/favicon.ico" || path == "/login" {
 		return true
 	}
-	// OAuth flow
-	if strings.HasPrefix(path, "/auth/") {
+	if isExactPublicAuthPath(path) || path == "/.well-known/oauth-authorization-server" || path == "/.well-known/oauth-protected-resource/mcp" || path == "/mcp" || path == "/openapi.json" || path == "/openapi.yaml" || path == "/llms.txt" {
 		return true
 	}
 	// Static assets required to render the login page (Next.js static export)
 	if strings.HasPrefix(path, "/_next/") || strings.HasPrefix(path, "/static/") {
 		return true
 	}
-	if strings.HasSuffix(path, ".css") || strings.HasSuffix(path, ".js") || strings.HasSuffix(path, ".ico") {
-		return true
-	}
-	// Context list endpoint (just IDs, no bodies) - allow anonymous reads
-	// Note: r.URL.Path doesn't include query string, so /v1/contexts?limit=5 has path="/v1/contexts"
-	// But NOT /v1/contexts/{id} or /v1/contexts/{id}/turns - those require auth
-	if path == "/v1/contexts" {
-		return true
-	}
-	// Metrics endpoint - needed for dashboard and monitoring systems
-	// Only exposes aggregate system stats, no sensitive user data
-	if path == "/v1/metrics" {
-		return true
-	}
-	// SSE events endpoint - notifications about context/turn changes
-	// No sensitive data, just IDs and timestamps
-	if path == "/v1/events" {
-		return true
-	}
 	return false
+}
+
+func isExactPublicAuthPath(path string) bool {
+	switch path {
+	case "/auth/login", "/auth/google/login", "/auth/google/callback", "/auth/google/logout",
+		"/auth/oidc/login", "/auth/oidc/callback", "/auth/aws/token",
+		"/oauth/authorize", "/oauth/register", "/oauth/token":
+		return true
+	default:
+		return false
+	}
 }

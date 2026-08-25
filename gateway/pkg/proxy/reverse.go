@@ -27,37 +27,48 @@ func NewReverseProxy(backendURL string, logger *slog.Logger) (*ReverseProxy, err
 		return nil, err
 	}
 
-	proxy := httputil.NewSingleHostReverseProxy(target)
+	proxy := &httputil.ReverseProxy{}
 
-	// Custom director to set headers
-	originalDirector := proxy.Director
-	proxy.Director = func(req *http.Request) {
-		originalDirector(req)
+	// Use Rewrite (Go 1.20+). Rewrite is mutually exclusive with Director
+	// and disables the stdlib's default `X-Forwarded-For` auto-append —
+	// essential for the Sprint 019 / ADR-006 trust contract: the gateway
+	// MUST be the sole writer of `X-Forwarded-For` on outbound requests.
+	proxy.Rewrite = func(r *httputil.ProxyRequest) {
+		// Point the outbound request at the target backend.
+		r.SetURL(target)
+		r.Out.Host = target.Host
 
-		// Set the host to the target
-		req.Host = target.Host
-
-		// Forward client IP
-		clientIP := extractClientIP(req)
-		if existing := req.Header.Get("X-Forwarded-For"); existing != "" {
-			req.Header.Set("X-Forwarded-For", existing+", "+clientIP)
-		} else {
-			req.Header.Set("X-Forwarded-For", clientIP)
-		}
-
-		// Forward the original protocol
-		if req.Header.Get("X-Forwarded-Proto") == "" {
-			if req.TLS != nil {
-				req.Header.Set("X-Forwarded-Proto", "https")
-			} else {
-				req.Header.Set("X-Forwarded-Proto", "http")
+		// XFF trust contract (Sprint 019 / ADR-006): the gateway is the
+		// trust boundary. DROP any caller-supplied `X-Forwarded-For` and
+		// `Forwarded` headers first — they are attacker-controllable.
+		// Then set `X-Forwarded-For` to our own TCP-peer observation. The
+		// `observedPeerIP` helper is the single source of real-client-IP
+		// truth across the gateway (logging, rate-limit, this director).
+		r.Out.Header.Del("X-Forwarded-For")
+		r.Out.Header.Del("Forwarded")
+		// Identity headers are gateway assertions. Never forward caller values.
+		for header := range r.Out.Header {
+			if strings.HasPrefix(strings.ToLower(header), "x-cxdb-") {
+				r.Out.Header.Del(header)
 			}
 		}
+		// Authentication is complete at the gateway. Do not forward browser
+		// cookies or bearer credentials to the Rust backend.
+		r.Out.Header.Del("Authorization")
+		r.Out.Header.Del("Cookie")
+		r.Out.Header.Set("X-Forwarded-For", observedPeerIP(r.In))
 
-		// Forward the original host
-		if req.Header.Get("X-Forwarded-Host") == "" {
-			req.Header.Set("X-Forwarded-Host", req.Host)
+		// X-Forwarded-Proto is a gateway assertion. Never preserve a caller value.
+		r.Out.Header.Del("X-Forwarded-Proto")
+		if r.In.TLS != nil {
+			r.Out.Header.Set("X-Forwarded-Proto", "https")
+		} else {
+			r.Out.Header.Set("X-Forwarded-Proto", "http")
 		}
+
+		// The Rust backend does not need the public host. Drop this header so a
+		// caller-selected Host value cannot cross the gateway trust boundary.
+		r.Out.Header.Del("X-Forwarded-Host")
 	}
 
 	// Custom error handler
@@ -93,19 +104,4 @@ func (rp *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // Target returns the backend URL.
 func (rp *ReverseProxy) Target() string {
 	return rp.target.String()
-}
-
-func extractClientIP(r *http.Request) string {
-	// Check X-Forwarded-For first (in case we're behind another proxy)
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		parts := strings.Split(xff, ",")
-		return strings.TrimSpace(parts[0])
-	}
-
-	// Fall back to RemoteAddr
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
-	}
-	return host
 }

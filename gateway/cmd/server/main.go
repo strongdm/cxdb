@@ -18,8 +18,8 @@ import (
 )
 
 // Entry point for the cxdb Gateway server.
-// This gateway provides Google OAuth authentication for reads while
-// forwarding writes directly to the cxdb backend.
+// This gateway provides browser OIDC, scoped bearer-token, and MCP OAuth
+// authentication while proxying the CXDB HTTP API.
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		Level:     slog.LevelInfo,
@@ -46,16 +46,19 @@ func main() {
 		logger.Error("session store init failed", "err", err)
 		os.Exit(1)
 	}
-	defer func() { _ = sessionStore.Close() }()
+	defer sessionStore.Close()
 
-	googleAuth := auth.NewGoogleAuth(
-		cfg.PublicBaseURL,
-		cfg.GoogleClientID,
-		cfg.GoogleClientSecret,
-		cfg.GoogleAllowedDomain,
-		cfg.PublicAllowedHosts,
-		sessionStore,
-	)
+	var googleAuth *auth.GoogleAuth
+	if cfg.GoogleClientID != "" {
+		googleAuth = auth.NewGoogleAuth(
+			cfg.PublicBaseURL,
+			cfg.GoogleClientID,
+			cfg.GoogleClientSecret,
+			cfg.GoogleAllowedDomain,
+			cfg.PublicAllowedHosts,
+			sessionStore,
+		)
+	}
 
 	reverseProxy, err := proxy.NewReverseProxy(cfg.CXDBBackendURL, logger)
 	if err != nil {

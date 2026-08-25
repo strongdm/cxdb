@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -29,6 +30,7 @@ type AWSTokenExchanger struct {
 	issuer              string
 	audience            string
 	debug               bool
+	httpClient          *http.Client
 }
 
 // NewAWSTokenExchanger creates a new AWS IAM token exchanger.
@@ -53,6 +55,12 @@ func NewAWSTokenExchanger(allowedRoles []string, tokenTTL time.Duration, signing
 		issuer:              issuer,
 		audience:            issuer,
 		debug:               strings.Contains(os.Getenv("DEBUG"), "auth") || strings.Contains(os.Getenv("DEBUG"), "all"),
+		httpClient: &http.Client{
+			Timeout: 10 * time.Second,
+			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
 	}, nil
 }
 
@@ -111,7 +119,7 @@ func (e *AWSTokenExchanger) TokenHandler(w http.ResponseWriter, r *http.Request)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(TokenExchangeResponse{
+	json.NewEncoder(w).Encode(TokenExchangeResponse{
 		Token:     token,
 		ExpiresAt: expiresAt,
 		TokenType: "Bearer",
@@ -143,11 +151,15 @@ func (e *AWSTokenExchanger) Verify(tokenString string) (*Session, error) {
 	roleStr, _ := role.(string)
 
 	return &Session{
-		ID:        fmt.Sprintf("aws:%s", token.Subject()),
-		Email:     fmt.Sprintf("%s@aws.iam", roleStr),
-		Name:      fmt.Sprintf("AWS IAM: %s", token.Subject()),
-		CreatedAt: token.IssuedAt(),
-		ExpiresAt: token.Expiration(),
+		ID:         fmt.Sprintf("aws:%s", token.Subject()),
+		Email:      fmt.Sprintf("%s@aws.iam", roleStr),
+		Name:       fmt.Sprintf("AWS IAM: %s", token.Subject()),
+		Scopes:     []string{"cxdb:read", "cxdb:write"},
+		CreatedAt:  token.IssuedAt(),
+		ExpiresAt:  token.Expiration(),
+		AuthMethod: "aws_sts",
+		Issuer:     e.issuer,
+		Subject:    token.Subject(),
 	}, nil
 }
 
@@ -160,16 +172,39 @@ type STSIdentity struct {
 
 // verifyPresignedURL executes a presigned GetCallerIdentity request.
 func (e *AWSTokenExchanger) verifyPresignedURL(presignedURL string) (*STSIdentity, error) {
+	parsed, err := url.Parse(presignedURL)
+	if err != nil {
+		return nil, fmt.Errorf("parse presigned URL: %w", err)
+	}
+	if parsed.Scheme != "https" || parsed.User != nil || parsed.Port() != "" {
+		return nil, fmt.Errorf("presigned URL must use HTTPS without userinfo or a custom port")
+	}
+	host := strings.ToLower(parsed.Hostname())
+	if host != "sts.amazonaws.com" && !regexp.MustCompile(`^sts\.[a-z0-9-]+\.amazonaws\.com$`).MatchString(host) {
+		return nil, fmt.Errorf("presigned URL host is not an AWS STS endpoint")
+	}
+	query := parsed.Query()
+	action := query.Get("Action")
+	if action == "" {
+		action = query.Get("action")
+	}
+	if action != "GetCallerIdentity" {
+		return nil, fmt.Errorf("presigned URL action must be GetCallerIdentity")
+	}
+	if query.Get("X-Amz-Signature") == "" && query.Get("x-amz-signature") == "" {
+		return nil, fmt.Errorf("presigned URL is missing a signature")
+	}
+
 	req, err := http.NewRequest(http.MethodGet, presignedURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := e.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("execute request: %w", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)

@@ -5,17 +5,21 @@ package proxy
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"log/slog"
-	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
 
+	mcpauth "github.com/modelcontextprotocol/go-sdk/auth"
+	"github.com/modelcontextprotocol/go-sdk/oauthex"
 	"github.com/strongdm/cxdb/gateway/internal/config"
 	"github.com/strongdm/cxdb/gateway/pkg/auth"
+	"github.com/strongdm/cxdb/gateway/pkg/mcpserver"
 	"golang.org/x/time/rate"
 )
 
@@ -25,6 +29,8 @@ type Server struct {
 	mux      *http.ServeMux
 	sessions *auth.SessionStore
 	google   *auth.GoogleAuth
+	oidc     *auth.BrowserOIDC
+	oauth    *auth.OAuthServer
 	proxy    *ReverseProxy
 	sse      *SSEBroker
 	logger   *slog.Logger
@@ -75,6 +81,22 @@ func New(cfg config.Config, sessions *auth.SessionStore, google *auth.GoogleAuth
 		limiters:    newIPRateLimiter(rate.Limit(5), 10),
 	}
 
+	if cfg.OIDCEnabled {
+		discoveryContext, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		browserOIDC, err := auth.NewBrowserOIDC(discoveryContext, cfg.OIDCIssuerURL, cfg.OIDCClientID, cfg.OIDCClientSecret, cfg.PublicBaseURL, cfg.OIDCAllowedDomains, sessions)
+		if err != nil {
+			return nil, fmt.Errorf("init browser OIDC: %w", err)
+		}
+		s.oidc = browserOIDC
+	}
+	oauthServer, err := auth.NewOAuthServer(sessions, cfg.PublicBaseURL, "/auth/login")
+	if err != nil {
+		return nil, fmt.Errorf("init OAuth server: %w", err)
+	}
+	s.oauth = oauthServer
+	s.tokenVerifiers = append(s.tokenVerifiers, auth.NewAPITokenVerifier(sessions), oauthServer)
+
 	// Initialize K8s OIDC verifier if enabled
 	if cfg.K8sOIDCEnabled {
 		k8sVerifier, err := auth.NewK8sOIDCVerifier(
@@ -91,7 +113,7 @@ func New(cfg config.Config, sessions *auth.SessionStore, google *auth.GoogleAuth
 
 	// Initialize AWS IAM token exchanger if enabled
 	if cfg.AWSIAMEnabled {
-		// Extract issuer from PublicBaseURL (e.g., "https://your-domain.com" -> "your-domain.com")
+		// Extract issuer from PublicBaseURL (e.g., "https://cxdb.example.com" -> "cxdb.example.com")
 		issuer := strings.TrimPrefix(cfg.PublicBaseURL, "https://")
 		issuer = strings.TrimPrefix(issuer, "http://")
 		issuer = strings.TrimSuffix(issuer, "/")
@@ -115,9 +137,31 @@ func New(cfg config.Config, sessions *auth.SessionStore, google *auth.GoogleAuth
 	mux.HandleFunc("/readyz", s.readyz)
 
 	// OAuth endpoints (public)
-	mux.HandleFunc("/auth/google/login", google.LoginHandler)
-	mux.HandleFunc("/auth/google/callback", google.CallbackHandler)
-	mux.HandleFunc("/auth/google/logout", google.LogoutHandler)
+	mux.HandleFunc("/auth/login", s.login)
+	if google != nil {
+		mux.HandleFunc("/auth/google/login", google.LoginHandler)
+		mux.HandleFunc("/auth/google/callback", google.CallbackHandler)
+		mux.HandleFunc("/auth/google/logout", google.LogoutHandler)
+	}
+	if s.oidc != nil {
+		mux.HandleFunc("/auth/oidc/login", s.oidc.LoginHandler)
+		mux.HandleFunc("/auth/oidc/callback", s.oidc.CallbackHandler)
+	}
+	mux.HandleFunc("/.well-known/oauth-authorization-server", s.oauth.MetadataHandler)
+	mux.HandleFunc("/oauth/register", s.oauth.RegisterHandler)
+	mux.Handle("/oauth/authorize", http.NewCrossOriginProtection().Handler(http.HandlerFunc(s.oauth.AuthorizeHandler)))
+	mux.HandleFunc("/oauth/token", s.oauth.TokenHandler)
+	resourceMetadataURL := strings.TrimSuffix(cfg.PublicBaseURL, "/") + "/.well-known/oauth-protected-resource/mcp"
+	resourceMetadata := &oauthex.ProtectedResourceMetadata{
+		Resource: strings.TrimSuffix(cfg.PublicBaseURL, "/") + "/mcp", AuthorizationServers: []string{strings.TrimSuffix(cfg.PublicBaseURL, "/")},
+		ScopesSupported: []string{"cxdb:read", "cxdb:write"}, BearerMethodsSupported: []string{"header"}, ResourceName: "CXDB MCP",
+	}
+	mux.Handle("/.well-known/oauth-protected-resource/mcp", mcpauth.ProtectedResourceMetadataHandler(resourceMetadata))
+	mcpHandler, err := mcpserver.New(cfg.CXDBBackendURL, resourceMetadataURL, s.tokenVerifiers, logger)
+	if err != nil {
+		return nil, fmt.Errorf("init MCP server: %w", err)
+	}
+	mux.Handle("/mcp", mcpHandler)
 
 	// AWS IAM token exchange endpoint (public - uses AWS creds for auth)
 	if s.awsExchanger != nil {
@@ -126,6 +170,8 @@ func New(cfg config.Config, sessions *auth.SessionStore, google *auth.GoogleAuth
 
 	// API info endpoint
 	mux.HandleFunc("/api/v1/me", s.me)
+	mux.HandleFunc("/api/v1/tokens", s.tokens)
+	mux.HandleFunc("/api/v1/tokens/", s.tokenByID)
 
 	// SSE endpoint for live events (must be before /v1/ catch-all)
 	mux.Handle("/v1/events", sseBroker)
@@ -145,14 +191,7 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	s.sse.Start(ctx)
 
 	addr := fmt.Sprintf(":%s", s.cfg.Port)
-	handler := auth.RequireAuthForReadsWithOptions(auth.AuthMiddlewareOptions{
-		Store:          s.sessions,
-		DevBypass:      s.cfg.DevMode,
-		TokenVerifiers: s.tokenVerifiers,
-	}, s.mux)
-	handler = s.rateLimitMiddleware(handler)
-	handler = s.securityHeaders(handler)
-	handler = s.loggingMiddleware(handler)
+	handler := s.Handler()
 
 	srv := &http.Server{
 		Addr:         addr,
@@ -176,6 +215,25 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		return err
 	}
 	return nil
+}
+
+// Handler returns the complete production middleware stack. It is also used
+// by integration tests so they exercise the same authorization boundary.
+func (s *Server) Handler() http.Handler {
+	handler := auth.RequireAuthForReadsWithOptions(auth.AuthMiddlewareOptions{
+		Store:          s.sessions,
+		DevBypass:      s.cfg.DevMode,
+		TokenVerifiers: s.tokenVerifiers,
+	}, s.mux)
+	handler = auth.RequireAuthForWrites(auth.AuthMiddlewareOptions{
+		Store:          s.sessions,
+		DevBypass:      s.cfg.DevMode,
+		TokenVerifiers: s.tokenVerifiers,
+	}, handler)
+	handler = s.rateLimitMiddleware(handler)
+	handler = s.securityHeaders(handler)
+	handler = s.loggingMiddleware(handler)
+	return handler
 }
 
 func (s *Server) healthz(w http.ResponseWriter, r *http.Request) {
@@ -203,13 +261,133 @@ func (s *Server) me(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_, _ = fmt.Fprintf(w, `{"email":%q,"name":%q,"picture":%q}`, user.Email, user.Name, user.Picture)
+	writeJSONResponse(w, http.StatusOK, map[string]any{"email": user.Email, "name": user.Name, "picture": user.Picture, "issuer": user.Issuer, "subject": user.Subject, "scopes": user.Scopes, "auth_method": user.AuthMethod, "csrf_token": s.sessions.CSRFToken(user)})
+}
+
+func (s *Server) login(w http.ResponseWriter, r *http.Request) {
+	destination := "/auth/google/login"
+	if s.oidc != nil {
+		destination = "/auth/oidc/login"
+	} else if s.google == nil {
+		http.Error(w, "no browser login provider is configured", http.StatusServiceUnavailable)
+		return
+	}
+	if returnTo := r.URL.Query().Get("return_to"); returnTo != "" {
+		destination += "?return_to=" + url.QueryEscape(returnTo)
+	}
+	http.Redirect(w, r, destination, http.StatusFound)
+}
+
+func (s *Server) tokens(w http.ResponseWriter, r *http.Request) {
+	user, ok := s.browserTokenManager(w, r)
+	if !ok {
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		tokens, err := s.sessions.ListPersonalAPITokens(r.Context(), user)
+		if err != nil {
+			http.Error(w, "unable to list tokens", http.StatusInternalServerError)
+			return
+		}
+		writeJSONResponse(w, http.StatusOK, map[string]any{"tokens": tokens})
+	case http.MethodPost:
+		if !s.sessions.ValidCSRFToken(user, r.Header.Get("X-CSRF-Token")) {
+			http.Error(w, "invalid CSRF token", http.StatusForbidden)
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
+		var request struct {
+			Name      string   `json:"name"`
+			Scopes    []string `json:"scopes"`
+			ExpiresAt string   `json:"expires_at"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		var expires time.Time
+		var err error
+		if request.ExpiresAt != "" {
+			expires, err = time.Parse(time.RFC3339, request.ExpiresAt)
+			if err != nil || expires.Before(time.Now()) {
+				http.Error(w, "expires_at must be a future RFC3339 time", http.StatusBadRequest)
+				return
+			}
+		}
+		metadata, plaintext, err := s.sessions.CreatePersonalAPIToken(r.Context(), user, request.Name, request.Scopes, expires)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSONResponse(w, http.StatusCreated, map[string]any{"token": metadata, "plaintext": plaintext})
+	default:
+		w.Header().Set("Allow", "GET, POST")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) tokenByID(w http.ResponseWriter, r *http.Request) {
+	user, ok := s.browserTokenManager(w, r)
+	if !ok {
+		return
+	}
+	if r.Method != http.MethodDelete {
+		w.Header().Set("Allow", "DELETE")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.sessions.ValidCSRFToken(user, r.Header.Get("X-CSRF-Token")) {
+		http.Error(w, "invalid CSRF token", http.StatusForbidden)
+		return
+	}
+	id := strings.TrimPrefix(r.URL.Path, "/api/v1/tokens/")
+	if id == "" || strings.Contains(id, "/") {
+		http.Error(w, "invalid token ID", http.StatusBadRequest)
+		return
+	}
+	if err := s.sessions.RevokePersonalAPIToken(r.Context(), user, id); err != nil {
+		http.Error(w, "token not found", http.StatusNotFound)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) browserTokenManager(w http.ResponseWriter, r *http.Request) (*auth.Session, bool) {
+	if r.Header.Get("Authorization") != "" {
+		http.Error(w, "personal tokens cannot manage personal tokens", http.StatusForbidden)
+		return nil, false
+	}
+	user := auth.UserFromContext(r.Context())
+	if user == nil {
+		user, _ = s.sessions.SessionFromRequest(r.Context(), r)
+	}
+	if user == nil || user.Subject == "" || user.Issuer == "" {
+		http.Error(w, "browser login required", http.StatusUnauthorized)
+		return nil, false
+	}
+	return user, true
+}
+
+func writeJSONResponse(w http.ResponseWriter, status int, value any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(value)
 }
 
 // staticHandler serves the embedded React frontend with smart routing for Next.js static export.
 func (s *Server) staticHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := strings.TrimPrefix(r.URL.Path, "/")
+		switch path {
+		case "openapi.yaml":
+			w.Header().Set("Content-Type", "application/yaml")
+		case "openapi.json":
+			w.Header().Set("Content-Type", "application/json")
+		case "llms.txt":
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		}
 
 		// Handle root - serve index.html
 		if path == "" {
@@ -278,7 +456,7 @@ func (s *Server) rateLimitMiddleware(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		ip := clientIP(r)
+		ip := observedPeerIP(r)
 		limiter := s.limiters.get(ip)
 		if !limiter.Allow() {
 			s.logger.Warn("rate_limit_exceeded", "ip", ip, "path", r.URL.Path)
@@ -294,7 +472,7 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Skip wrapping for SSE endpoint - the wrapper can interfere with HTTP/2 streaming
 		if r.URL.Path == "/v1/events" {
-			s.logger.Info("http_sse_start", "method", r.Method, "path", r.URL.Path, "ip", clientIP(r))
+			s.logger.Info("http_sse_start", "method", r.Method, "path", r.URL.Path, "ip", observedPeerIP(r))
 			next.ServeHTTP(w, r)
 			s.logger.Info("http_sse_end", "method", r.Method, "path", r.URL.Path)
 			return
@@ -315,7 +493,7 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 			"status", sw.status,
 			"duration_ms", time.Since(start).Milliseconds(),
 			"size_bytes", sw.bytes,
-			"ip", clientIP(r),
+			"ip", observedPeerIP(r),
 			"user", user,
 		)
 	})
@@ -343,19 +521,6 @@ func (w *statusWriter) Flush() {
 	if f, ok := w.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
 	}
-}
-
-func clientIP(r *http.Request) string {
-	xff := r.Header.Get("X-Forwarded-For")
-	if xff != "" {
-		parts := strings.Split(xff, ",")
-		return strings.TrimSpace(parts[0])
-	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
-	}
-	return host
 }
 
 type ipRateLimiter struct {
@@ -386,7 +551,7 @@ func (l *ipRateLimiter) get(ip string) *rate.Limiter {
 
 func shouldRateLimit(path string) bool {
 	path = strings.ToLower(path)
-	if path == "/login" || strings.HasPrefix(path, "/auth/") {
+	if path == "/login" || strings.HasPrefix(path, "/auth/") || path == "/oauth/register" || path == "/oauth/token" || path == "/oauth/authorize" {
 		return true
 	}
 	return false

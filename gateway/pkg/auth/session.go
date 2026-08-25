@@ -10,6 +10,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -24,12 +25,33 @@ import (
 
 // Session captures the authenticated user for a browser.
 type Session struct {
-	ID        string
-	Email     string
-	Name      string
-	Picture   string
-	CreatedAt time.Time
-	ExpiresAt time.Time
+	ID         string
+	Email      string
+	Name       string
+	Picture    string
+	Scopes     []string
+	CreatedAt  time.Time
+	ExpiresAt  time.Time
+	AuthMethod string // Authentication method, for example "oidc" or "k8s_oidc".
+	Issuer     string // Token issuer URL
+	Subject    string // Stable subject within Issuer
+}
+
+// HasScope returns true if the session includes the given scope.
+func (s *Session) HasScope(scope string) bool {
+	for _, sc := range s.Scopes {
+		if sc == scope {
+			return true
+		}
+	}
+	return false
+}
+
+// IsAPIToken reports whether this session came from a personal API token.
+// Handlers can use this to prevent a bearer token from creating or revoking
+// other personal credentials.
+func (s *Session) IsAPIToken() bool {
+	return s != nil && s.AuthMethod == APITokenAuthMethod
 }
 
 // SessionStore handles persistence of sessions in SQLite and
@@ -84,47 +106,104 @@ func (s *SessionStore) ensureSchema() error {
 		expires_at TIMESTAMP NOT NULL
 	);
 	CREATE INDEX IF NOT EXISTS idx_sessions_email ON sessions(email);
+	CREATE TABLE IF NOT EXISTS api_tokens (
+		id TEXT PRIMARY KEY,
+		name TEXT NOT NULL,
+		issuer TEXT NOT NULL,
+		subject TEXT NOT NULL,
+		scopes TEXT NOT NULL,
+		token_hash TEXT NOT NULL UNIQUE,
+		created_at TIMESTAMP NOT NULL,
+		expires_at TIMESTAMP NOT NULL,
+		revoked_at TIMESTAMP,
+		last_used_at TIMESTAMP
+	);
+	CREATE INDEX IF NOT EXISTS idx_api_tokens_owner ON api_tokens(issuer, subject);
+	CREATE INDEX IF NOT EXISTS idx_api_tokens_hash ON api_tokens(token_hash);
 	`
 	if _, err := s.db.Exec(schema); err != nil {
 		return fmt.Errorf("init schema: %w", err)
 	}
 	// Backfill for older schemas missing the picture column; ignore duplicate errors.
 	_, _ = s.db.Exec(`ALTER TABLE sessions ADD COLUMN picture TEXT;`)
+	// These columns are deliberately nullable so that existing installations can
+	// be upgraded without rewriting or invalidating their browser sessions.
+	for _, statement := range []string{
+		`ALTER TABLE sessions ADD COLUMN issuer TEXT`,
+		`ALTER TABLE sessions ADD COLUMN subject TEXT`,
+		`ALTER TABLE sessions ADD COLUMN scopes TEXT`,
+		`ALTER TABLE sessions ADD COLUMN auth_method TEXT`,
+	} {
+		_, _ = s.db.Exec(statement)
+	}
 	return nil
 }
 
 // Create inserts a new session and returns its ID.
 func (s *SessionStore) Create(ctx context.Context, email, name, picture string) (string, error) {
+	return s.CreateForIdentity(ctx, "https://accounts.google.com", email, email, name, picture, "google_oauth", []string{"cxdb:read", "cxdb:write"})
+}
+
+// CreateForIdentity inserts a browser session with a stable issuer/subject
+// identity and authorization scopes. Create remains the compatibility API for
+// callers that only have a Google profile.
+func (s *SessionStore) CreateForIdentity(ctx context.Context, issuer, subject, email, name, picture, authMethod string, scopes []string) (string, error) {
 	id, err := randomID()
 	if err != nil {
 		return "", err
 	}
 	now := time.Now().UTC()
 	expires := now.Add(s.ttl)
+	scopeJSON, err := json.Marshal(normalizeScopes(scopes))
+	if err != nil {
+		return "", fmt.Errorf("encode session scopes: %w", err)
+	}
 	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO sessions (id, email, name, picture, created_at, expires_at)
-		VALUES (?, ?, ?, ?, ?, ?)
-	`, id, email, name, picture, now, expires)
+		INSERT INTO sessions (id, email, name, picture, issuer, subject, scopes, auth_method, created_at, expires_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, id, email, name, picture, strings.TrimSpace(issuer), strings.TrimSpace(subject), string(scopeJSON), strings.TrimSpace(authMethod), now, expires)
 	if err != nil {
 		return "", fmt.Errorf("insert session: %w", err)
 	}
 	return id, nil
 }
 
+// CreateWithIdentity is retained as a convenience for callers using the
+// original field-oriented order introduced during the identity migration.
+func (s *SessionStore) CreateWithIdentity(ctx context.Context, email, name, picture, issuer, subject string, scopes []string, authMethod string) (string, error) {
+	return s.CreateForIdentity(ctx, issuer, subject, email, name, picture, authMethod, scopes)
+}
+
 // Get returns a valid, non-expired session by ID.
 func (s *SessionStore) Get(ctx context.Context, id string) (*Session, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, email, name, picture, created_at, expires_at
+		SELECT id, email, name, picture, issuer, subject, scopes, auth_method, created_at, expires_at
 		FROM sessions
 		WHERE id = ?
 	`, id)
 
 	var sess Session
-	if err := row.Scan(&sess.ID, &sess.Email, &sess.Name, &sess.Picture, &sess.CreatedAt, &sess.ExpiresAt); err != nil {
+	var email, name, picture, issuer, subject, scopesJSON, authMethod sql.NullString
+	if err := row.Scan(&sess.ID, &email, &name, &picture, &issuer, &subject, &scopesJSON, &authMethod, &sess.CreatedAt, &sess.ExpiresAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("select session: %w", err)
+	}
+	sess.Email, sess.Name, sess.Picture = email.String, name.String, picture.String
+	sess.Issuer, sess.Subject, sess.AuthMethod = issuer.String, subject.String, authMethod.String
+	if scopesJSON.Valid && scopesJSON.String != "" {
+		if err := json.Unmarshal([]byte(scopesJSON.String), &sess.Scopes); err != nil {
+			return nil, fmt.Errorf("decode session scopes: %w", err)
+		}
+	}
+	// Sessions that predate the identity migration were authenticated Google
+	// browser sessions. Preserve them until their normal expiry.
+	if !issuer.Valid && !subject.Valid && !scopesJSON.Valid && !authMethod.Valid {
+		sess.Issuer = "https://accounts.google.com"
+		sess.Subject = sess.Email
+		sess.AuthMethod = "google_oauth"
+		sess.Scopes = []string{"cxdb:read", "cxdb:write"}
 	}
 	if time.Now().After(sess.ExpiresAt) {
 		_ = s.Delete(ctx, id)
@@ -192,6 +271,22 @@ func (s *SessionStore) SetCookie(w http.ResponseWriter, sessionID string) {
 		Secure:   s.secure,
 		SameSite: http.SameSiteLaxMode,
 	})
+}
+
+// CSRFToken returns a session-bound token for browser credential-management requests.
+func (s *SessionStore) CSRFToken(session *Session) string {
+	if session == nil || session.ID == "" {
+		return ""
+	}
+	mac := hmac.New(sha256.New, s.secret)
+	_, _ = mac.Write([]byte("cxdb-csrf\x00" + session.ID))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// ValidCSRFToken checks a session-bound CSRF token in constant time.
+func (s *SessionStore) ValidCSRFToken(session *Session, token string) bool {
+	expected := s.CSRFToken(session)
+	return expected != "" && hmac.Equal([]byte(expected), []byte(strings.TrimSpace(token)))
 }
 
 // ClearCookie removes the session cookie from the browser.

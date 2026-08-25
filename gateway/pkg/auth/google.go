@@ -11,7 +11,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -66,7 +65,10 @@ func (g *GoogleAuth) LoginHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unable to create state", http.StatusInternalServerError)
 		return
 	}
-	g.setPostAuthRedirectCookie(w, r)
+	g.setPostAuthRedirectCookie(w)
+	if returnTo := safeLocalReturn(r.URL.Query().Get("return_to")); returnTo != "" {
+		http.SetCookie(w, &http.Cookie{Name: "post_auth_path", Value: g.sessions.sign(returnTo), Path: "/", MaxAge: int(g.stateMaxAge.Seconds()), HttpOnly: true, Secure: g.sessions.Secure(), SameSite: http.SameSiteLaxMode})
+	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     "oauth_state",
 		Value:    state,
@@ -130,7 +132,11 @@ func (g *GoogleAuth) CallbackHandler(w http.ResponseWriter, r *http.Request) {
 		name = email
 	}
 
-	sessionID, err := g.sessions.Create(ctx, email, name, user.Picture)
+	subject := user.ID
+	if subject == "" {
+		subject = email
+	}
+	sessionID, err := g.sessions.CreateForIdentity(ctx, "https://accounts.google.com", subject, email, name, user.Picture, "google_oauth", []string{"cxdb:read", "cxdb:write"})
 	if err != nil {
 		if g.sessions.Debug() {
 			log.Printf("[auth] create session error: %v", err)
@@ -158,6 +164,7 @@ func (g *GoogleAuth) LogoutHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 type googleUser struct {
+	ID      string `json:"id"`
 	Email   string `json:"email"`
 	Name    string `json:"name"`
 	Picture string `json:"picture"`
@@ -169,7 +176,7 @@ func (g *GoogleAuth) fetchUser(ctx context.Context, token *oauth2.Token) (google
 	if err != nil {
 		return googleUser{}, fmt.Errorf("userinfo request: %w", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		return googleUser{}, fmt.Errorf("userinfo status: %d", resp.StatusCode)
 	}
@@ -215,21 +222,14 @@ func (g *GoogleAuth) clearStateCookie(w http.ResponseWriter) {
 	})
 }
 
-func (g *GoogleAuth) setPostAuthRedirectCookie(w http.ResponseWriter, r *http.Request) {
-	host := canonicalHost(r)
-	if host == "" {
+func (g *GoogleAuth) setPostAuthRedirectCookie(w http.ResponseWriter) {
+	// Use the configured public URL. Host and scheme headers are client input
+	// at this trust boundary and must not select the post-login destination.
+	publicURL, err := url.Parse(strings.TrimSuffix(g.publicURL, "/"))
+	if err != nil || publicURL.Host == "" || (publicURL.Scheme != "https" && publicURL.Scheme != "http") {
 		return
 	}
-	scheme := "https"
-	if forwarded := strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")); forwarded != "" {
-		scheme = strings.ToLower(forwarded)
-	} else if r.TLS == nil {
-		scheme = "http"
-	}
-	if scheme != "https" && scheme != "http" {
-		return
-	}
-	base := scheme + "://" + host
+	base := publicURL.Scheme + "://" + publicURL.Host
 	if !g.isAllowedRedirectBase(base) {
 		return
 	}
@@ -246,6 +246,14 @@ func (g *GoogleAuth) setPostAuthRedirectCookie(w http.ResponseWriter, r *http.Re
 }
 
 func (g *GoogleAuth) postAuthRedirect(w http.ResponseWriter, r *http.Request) string {
+	if pathCookie, err := r.Cookie("post_auth_path"); err == nil {
+		g.clearPostAuthPathCookie(w)
+		if path, ok := g.sessions.verify(pathCookie.Value); ok {
+			if safe := safeLocalReturn(path); safe != "" {
+				return safe
+			}
+		}
+	}
 	c, err := r.Cookie("post_auth_redirect")
 	if err != nil {
 		return ""
@@ -266,6 +274,10 @@ func (g *GoogleAuth) postAuthRedirect(w http.ResponseWriter, r *http.Request) st
 	u.RawQuery = ""
 	u.Fragment = ""
 	return u.String()
+}
+
+func (g *GoogleAuth) clearPostAuthPathCookie(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{Name: "post_auth_path", Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: g.sessions.Secure(), SameSite: http.SameSiteLaxMode})
 }
 
 func (g *GoogleAuth) clearPostAuthRedirectCookie(w http.ResponseWriter) {
@@ -311,17 +323,6 @@ func (g *GoogleAuth) isAllowedRedirectBase(rawBaseURL string) bool {
 		return true
 	}
 	return false
-}
-
-func canonicalHost(r *http.Request) string {
-	host := strings.ToLower(strings.TrimSpace(r.Host))
-	if host == "" {
-		return ""
-	}
-	if h, _, err := net.SplitHostPort(host); err == nil {
-		return h
-	}
-	return host
 }
 
 // AttachUser stores the authenticated session on the request context.

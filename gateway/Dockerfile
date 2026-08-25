@@ -26,7 +26,7 @@ RUN pnpm build
 # ============================================
 # Stage 2: Build Go binary with CGO for SQLite
 # ============================================
-FROM --platform=linux/amd64 golang:1.23-bookworm AS builder
+FROM --platform=linux/amd64 golang:1.25-bookworm AS builder
 WORKDIR /app
 
 # Copy go mod files first for layer caching

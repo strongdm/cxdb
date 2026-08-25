@@ -20,9 +20,14 @@ import (
 // Values are sourced from environment variables so they can
 // be injected locally via a .env file or via platform secrets.
 type Config struct {
-	GoogleClientID     string
-	GoogleClientSecret string
+	GoogleClientID      string
+	GoogleClientSecret  string
 	GoogleAllowedDomain string
+	OIDCEnabled         bool
+	OIDCIssuerURL       string
+	OIDCClientID        string
+	OIDCClientSecret    string
+	OIDCAllowedDomains  []string
 
 	PublicBaseURL      string
 	PublicAllowedHosts []string
@@ -94,6 +99,11 @@ func Load() (Config, error) {
 		SessionTTL:          defaultSessionTTL,
 		CXDBBackendURL:      firstNonEmpty(os.Getenv("CXDB_BACKEND_URL"), defaultCXDBBackendURL),
 	}
+	cfg.OIDCEnabled = parseBoolEnv("OIDC_ENABLED")
+	cfg.OIDCIssuerURL = strings.TrimSuffix(strings.TrimSpace(os.Getenv("OIDC_ISSUER_URL")), "/")
+	cfg.OIDCClientID = strings.TrimSpace(os.Getenv("OIDC_CLIENT_ID"))
+	cfg.OIDCClientSecret = strings.TrimSpace(os.Getenv("OIDC_CLIENT_SECRET"))
+	cfg.OIDCAllowedDomains = splitAndTrim(os.Getenv("OIDC_ALLOWED_DOMAINS"))
 
 	if ttlStr := strings.TrimSpace(os.Getenv("SESSION_TTL_HOURS")); ttlStr != "" {
 		if hours, err := strconv.Atoi(ttlStr); err == nil && hours > 0 {
@@ -134,7 +144,6 @@ func Load() (Config, error) {
 
 	// Renderer origin allowlist for CSP script-src directive
 	// Defaults to common public CDNs if not specified
-	// For self-hosted renderers, set ALLOWED_RENDERER_ORIGINS to your CDN origin
 	cfg.AllowedRendererOrigins = splitAndTrimPreserveCase(os.Getenv("ALLOWED_RENDERER_ORIGINS"))
 	if len(cfg.AllowedRendererOrigins) == 0 {
 		cfg.AllowedRendererOrigins = []string{
@@ -156,17 +165,37 @@ func Load() (Config, error) {
 
 func (c Config) validate() error {
 	var missing []string
-	if c.GoogleClientID == "" {
-		missing = append(missing, "GOOGLE_CLIENT_ID")
+	if len(strings.TrimSpace(c.SessionSecret)) < 32 {
+		missing = append(missing, "SESSION_SECRET (minimum 32 bytes)")
 	}
-	if c.GoogleClientSecret == "" {
-		missing = append(missing, "GOOGLE_CLIENT_SECRET")
+	googleConfigured := c.GoogleClientID != "" || c.GoogleClientSecret != "" || c.GoogleAllowedDomain != ""
+	if googleConfigured {
+		if c.GoogleClientID == "" {
+			missing = append(missing, "GOOGLE_CLIENT_ID")
+		}
+		if c.GoogleClientSecret == "" {
+			missing = append(missing, "GOOGLE_CLIENT_SECRET")
+		}
+		if c.GoogleAllowedDomain == "" {
+			missing = append(missing, "GOOGLE_ALLOWED_DOMAIN")
+		}
 	}
-	if c.SessionSecret == "" {
-		missing = append(missing, "SESSION_SECRET")
+	if c.OIDCEnabled {
+		if c.OIDCIssuerURL == "" {
+			missing = append(missing, "OIDC_ISSUER_URL")
+		}
+		if c.OIDCClientID == "" {
+			missing = append(missing, "OIDC_CLIENT_ID")
+		}
+		if c.OIDCClientSecret == "" {
+			missing = append(missing, "OIDC_CLIENT_SECRET")
+		}
+		if len(c.OIDCAllowedDomains) == 0 {
+			missing = append(missing, "OIDC_ALLOWED_DOMAINS")
+		}
 	}
-	if c.GoogleAllowedDomain == "" {
-		missing = append(missing, "GOOGLE_ALLOWED_DOMAIN")
+	if !googleConfigured && !c.OIDCEnabled && !c.DevMode {
+		missing = append(missing, "GOOGLE_CLIENT_ID or OIDC_ENABLED=true")
 	}
 
 	// Conditional validation for K8s OIDC
@@ -225,6 +254,15 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
+func containsExact(values []string, want string) bool {
+	for _, v := range values {
+		if v == want {
+			return true
+		}
+	}
+	return false
+}
+
 func parseBoolEnv(key string) bool {
 	raw := strings.TrimSpace(os.Getenv(key))
 	if raw == "" {
@@ -238,8 +276,19 @@ func parseBoolEnv(key string) bool {
 }
 
 func isLocalhostURL(raw string) bool {
-	lower := strings.ToLower(raw)
-	return strings.Contains(lower, "localhost") || strings.Contains(lower, "127.0.0.1")
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.User != nil || u.Host == "" {
+		return false
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return false
+	}
+	switch strings.ToLower(u.Hostname()) {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	default:
+		return false
+	}
 }
 
 func hostnameFromURL(raw string) string {
