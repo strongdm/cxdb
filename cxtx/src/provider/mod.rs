@@ -1,3 +1,6 @@
+// Copyright 2025 StrongDM Inc
+// SPDX-License-Identifier: Apache-2.0
+
 pub mod anthropic;
 pub mod openai;
 
@@ -69,10 +72,7 @@ impl ProviderKind {
                     out.extend(["-c".to_string(), "prefer_websockets=false".to_string()]);
                 }
                 if !has_codex_feature_override(args, "responses_websockets") {
-                    out.extend([
-                        "--disable".to_string(),
-                        "responses_websockets".to_string(),
-                    ]);
+                    out.extend(["--disable".to_string(), "responses_websockets".to_string()]);
                 }
                 if !has_codex_feature_override(args, "responses_websockets_v2") {
                     out.extend([

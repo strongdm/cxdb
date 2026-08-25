@@ -1,3 +1,6 @@
+// Copyright 2025 StrongDM Inc
+// SPDX-License-Identifier: Apache-2.0
+
 use serde_json::Value;
 
 use crate::provider::{ExchangeState, PreparedExchange};
@@ -418,7 +421,10 @@ fn is_bootstrap_input_item(item: &Value) -> bool {
         || trimmed.starts_with("<environment_context>")
 }
 
-fn parse_assistant_payload(payload: &Value, fallback_model: Option<&str>) -> Result<Option<HistoryItem>, String> {
+fn parse_assistant_payload(
+    payload: &Value,
+    fallback_model: Option<&str>,
+) -> Result<Option<HistoryItem>, String> {
     if let Some(message) = payload
         .get("choices")
         .and_then(Value::as_array)
@@ -561,7 +567,11 @@ fn absorb_tool_call_delta(slots: &mut Vec<PartialToolCall>, delta: &Value) {
     }
 }
 
-fn absorb_responses_output(response: &Value, content: &mut String, tool_calls: &mut Vec<PartialToolCall>) {
+fn absorb_responses_output(
+    response: &Value,
+    content: &mut String,
+    tool_calls: &mut Vec<PartialToolCall>,
+) {
     let Some(items) = response.get("output").and_then(Value::as_array) else {
         return;
     };
@@ -578,7 +588,9 @@ fn absorb_responses_output_item(
     match item.get("type").and_then(Value::as_str) {
         Some("message") => {
             if content.is_empty() {
-                content.push_str(&content_to_text(item.get("content").unwrap_or(&Value::Null)));
+                content.push_str(&content_to_text(
+                    item.get("content").unwrap_or(&Value::Null),
+                ));
             }
         }
         Some("function_call") => {

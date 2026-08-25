@@ -452,6 +452,16 @@ mod tests {
             follow_turns(&ctx, event_rx, client.clone(), vec![with_follow_buffer(10)]);
 
         event_tx.send(make_turn_event(context_id, 2, 1)).unwrap();
+        let mut got = vec![
+            out.recv_timeout(Duration::from_secs(1))
+                .expect("backfill turn 1")
+                .turn
+                .turn_id,
+            out.recv_timeout(Duration::from_secs(1))
+                .expect("backfill turn 2")
+                .turn
+                .turn_id,
+        ];
 
         client.set_context(
             context_id,
@@ -495,7 +505,7 @@ mod tests {
         event_tx.send(make_turn_event(context_id, 3, 2)).unwrap();
         drop(event_tx);
 
-        let got: Vec<u64> = out.iter().map(|turn| turn.turn.turn_id).collect();
+        got.extend(out.iter().map(|turn| turn.turn.turn_id));
         if let Some(err) = errs.try_iter().next() {
             panic!("unexpected error: {}", err);
         }

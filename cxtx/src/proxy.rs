@@ -1,3 +1,6 @@
+// Copyright 2025 StrongDM Inc
+// SPDX-License-Identifier: Apache-2.0
+
 use anyhow::{anyhow, Context, Result};
 use async_stream::stream;
 use axum::body::{to_bytes, Body};
@@ -13,11 +16,11 @@ use serde_json::Value;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
+use tokio::sync::{mpsc, oneshot, RwLock};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::error::ProtocolError as TungsteniteProtocolError;
 use tokio_tungstenite::tungstenite::protocol::Message as UpstreamWsMessage;
 use tokio_tungstenite::tungstenite::Error as TungsteniteError;
-use tokio::sync::{mpsc, oneshot, RwLock};
 use url::Url;
 
 use crate::delivery::DeliveryHandle;
@@ -317,7 +320,9 @@ async fn handle_websocket_proxy_request(
 
     let status = StatusCode::from_u16(upstream_response.status().as_u16())
         .unwrap_or(StatusCode::SWITCHING_PROTOCOLS);
-    let request_id = state.provider.request_id_from_headers(upstream_response.headers());
+    let request_id = state
+        .provider
+        .request_id_from_headers(upstream_response.headers());
     let response_artifact = state
         .ledger
         .record_response(
@@ -363,6 +368,7 @@ async fn handle_websocket_proxy_request(
         .into_response())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn body_response(
     state: ProxyState,
     delivery: DeliveryHandle,
@@ -412,6 +418,7 @@ async fn body_response(
         .context("failed to build proxied response")
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn stream_response(
     state: ProxyState,
     delivery: DeliveryHandle,
@@ -452,13 +459,16 @@ async fn stream_response(
                                 stream_artifact_refs.stream_path = Some(path);
                             }
                             Err(err) => {
-                                delivery.enqueue_turn(session.provider_error_turn(
-                                    &exchange_id,
-                                    "artifact_write_error",
-                                    &format!("failed to persist stream frame: {err}"),
-                                    request_id_for_stream.as_deref(),
-                                    &stream_artifact_refs,
-                                )).await.ok();
+                                delivery
+                                    .enqueue_turn(session.provider_error_turn(
+                                        &exchange_id,
+                                        "artifact_write_error",
+                                        &format!("failed to persist stream frame: {err}"),
+                                        request_id_for_stream.as_deref(),
+                                        &stream_artifact_refs,
+                                    ))
+                                    .await
+                                    .ok();
                             }
                         }
                         exchange_state.absorb_sse_frame(&frame);
@@ -468,40 +478,47 @@ async fn stream_response(
                     }
                 }
                 Err(err) => {
-                    delivery.enqueue_turn(session.provider_error_turn(
-                        &exchange_id,
-                        "stream_transport_error",
-                        &format!("failed to read upstream stream: {err}"),
-                        request_id_for_stream.as_deref(),
-                        &stream_artifact_refs,
-                    )).await.ok();
-                    let _ = tx
-                        .send(Err(std::io::Error::other(err.to_string())))
-                        .await;
+                    delivery
+                        .enqueue_turn(session.provider_error_turn(
+                            &exchange_id,
+                            "stream_transport_error",
+                            &format!("failed to read upstream stream: {err}"),
+                            request_id_for_stream.as_deref(),
+                            &stream_artifact_refs,
+                        ))
+                        .await
+                        .ok();
+                    let _ = tx.send(Err(std::io::Error::other(err.to_string()))).await;
                     break;
                 }
             }
         }
 
-        match ledger.record_response(
-            &exchange_id,
-            status.as_u16(),
-            request_id_for_stream.as_deref(),
-            content_type.as_deref(),
-            raw_stream.as_bytes(),
-            None,
-        ).await {
+        match ledger
+            .record_response(
+                &exchange_id,
+                status.as_u16(),
+                request_id_for_stream.as_deref(),
+                content_type.as_deref(),
+                raw_stream.as_bytes(),
+                None,
+            )
+            .await
+        {
             Ok(path) => {
                 stream_artifact_refs.response_path = Some(path);
             }
             Err(err) => {
-                delivery.enqueue_turn(session.provider_error_turn(
-                    &exchange_id,
-                    "artifact_write_error",
-                    &format!("failed to persist streamed response transcript: {err}"),
-                    request_id_for_stream.as_deref(),
-                    &stream_artifact_refs,
-                )).await.ok();
+                delivery
+                    .enqueue_turn(session.provider_error_turn(
+                        &exchange_id,
+                        "artifact_write_error",
+                        &format!("failed to persist streamed response transcript: {err}"),
+                        request_id_for_stream.as_deref(),
+                        &stream_artifact_refs,
+                    ))
+                    .await
+                    .ok();
             }
         }
 
@@ -541,6 +558,7 @@ async fn enqueue_turns(delivery: &DeliveryHandle, turns: Vec<crate::turns::TurnE
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn relay_websocket(
     downstream_socket: WebSocket,
     upstream_socket: tokio_tungstenite::WebSocketStream<
@@ -838,12 +856,10 @@ fn map_downstream_message(message: DownstreamWsMessage) -> Option<UpstreamWsMess
 
 fn map_upstream_message(message: UpstreamWsMessage) -> Option<DownstreamWsMessage> {
     match message {
-        UpstreamWsMessage::Text(text) => Some(DownstreamWsMessage::Text(text.to_string().into())),
-        UpstreamWsMessage::Binary(bytes) => {
-            Some(DownstreamWsMessage::Binary(bytes.to_vec().into()))
-        }
-        UpstreamWsMessage::Ping(bytes) => Some(DownstreamWsMessage::Ping(bytes.to_vec().into())),
-        UpstreamWsMessage::Pong(bytes) => Some(DownstreamWsMessage::Pong(bytes.to_vec().into())),
+        UpstreamWsMessage::Text(text) => Some(DownstreamWsMessage::Text(text.to_string())),
+        UpstreamWsMessage::Binary(bytes) => Some(DownstreamWsMessage::Binary(bytes.to_vec())),
+        UpstreamWsMessage::Ping(bytes) => Some(DownstreamWsMessage::Ping(bytes.to_vec())),
+        UpstreamWsMessage::Pong(bytes) => Some(DownstreamWsMessage::Pong(bytes.to_vec())),
         UpstreamWsMessage::Close(_) => Some(DownstreamWsMessage::Close(None)),
         UpstreamWsMessage::Frame(_) => None,
     }
@@ -1052,21 +1068,15 @@ mod tests {
         headers.insert("accept-encoding", HeaderValue::from_static("gzip, br"));
 
         let forwarded = forwardable_headers(&headers);
-        assert!(
-            !forwarded
-                .iter()
-                .any(|(name, _)| name.as_str().eq_ignore_ascii_case("host"))
-        );
-        assert!(
-            !forwarded
-                .iter()
-                .any(|(name, _)| name.as_str().eq_ignore_ascii_case("accept-encoding"))
-        );
-        assert!(
-            forwarded
-                .iter()
-                .any(|(name, value)| name == "authorization" && value == "Bearer test")
-        );
+        assert!(!forwarded
+            .iter()
+            .any(|(name, _)| name.as_str().eq_ignore_ascii_case("host")));
+        assert!(!forwarded
+            .iter()
+            .any(|(name, _)| name.as_str().eq_ignore_ascii_case("accept-encoding")));
+        assert!(forwarded
+            .iter()
+            .any(|(name, value)| name == "authorization" && value == "Bearer test"));
     }
 
     #[test]
@@ -1077,16 +1087,12 @@ mod tests {
         headers.insert("sec-websocket-version", HeaderValue::from_static("13"));
 
         let forwarded = websocket_forwardable_headers(&headers);
-        assert!(
-            forwarded
-                .iter()
-                .any(|(name, value)| name == "authorization" && value == "Bearer test")
-        );
-        assert!(
-            !forwarded
-                .iter()
-                .any(|(name, _)| name.as_str().eq_ignore_ascii_case("sec-websocket-key"))
-        );
+        assert!(forwarded
+            .iter()
+            .any(|(name, value)| name == "authorization" && value == "Bearer test"));
+        assert!(!forwarded
+            .iter()
+            .any(|(name, _)| name.as_str().eq_ignore_ascii_case("sec-websocket-key")));
     }
 
     #[test]
@@ -1111,6 +1117,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    #[allow(clippy::result_large_err)]
     async fn websocket_upgrade_requests_are_relayed_to_upstream() {
         let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let upstream_addr = upstream_listener.local_addr().unwrap();

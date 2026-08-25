@@ -1,3 +1,6 @@
+// Copyright 2025 StrongDM Inc
+// SPDX-License-Identifier: Apache-2.0
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::net::TcpListener;
@@ -173,9 +176,11 @@ printf 'codex-child-stderr\n' >&2
     assert!(fs::read_to_string(fixture_dir.join("openai_base_url.txt"))
         .unwrap()
         .contains("/v1"));
-    assert!(fs::read_to_string(fixture_dir.join("openai_base_url_env.txt"))
-        .unwrap()
-        .contains("/v1"));
+    assert!(
+        fs::read_to_string(fixture_dir.join("openai_base_url_env.txt"))
+            .unwrap()
+            .contains("/v1")
+    );
     assert_eq!(
         fs::read_to_string(fixture_dir.join("openai_api_base_env.txt")).unwrap(),
         fs::read_to_string(fixture_dir.join("openai_api_base.txt")).unwrap()
@@ -506,7 +511,13 @@ PY
     let item_types = turn_item_types(&turns);
     assert_eq!(
         item_types,
-        vec!["system", "assistant_turn", "user_input", "assistant_turn", "system"]
+        vec![
+            "system",
+            "assistant_turn",
+            "user_input",
+            "assistant_turn",
+            "system"
+        ]
     );
     assert_eq!(turns[1]["data"]["turn"]["text"], "previous answer");
     assert_eq!(turns[2]["data"]["user_input"]["text"], "real prompt");
@@ -547,7 +558,10 @@ async fn websocket_proxy_uploads_canonical_turns_into_cxdb() {
     .unwrap();
     proxy.set_delivery(delivery.clone()).await;
     delivery.enqueue_create_context().await.unwrap();
-    delivery.enqueue_turn(session.session_start_turn()).await.unwrap();
+    delivery
+        .enqueue_turn(session.session_start_turn())
+        .await
+        .unwrap();
 
     let mut proxy_url = proxy.proxy_base_url();
     proxy_url.set_scheme("ws").unwrap();
@@ -1517,6 +1531,7 @@ struct MockOpenAiWebsocket {
 }
 
 impl MockOpenAiWebsocket {
+    #[allow(clippy::result_large_err)]
     async fn start() -> anyhow::Result<Self> {
         let listener = TokioTcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
@@ -2153,17 +2168,15 @@ fn turn_item_types(turns: &[Value]) -> Vec<&str> {
 }
 
 fn openai_input_last_user_text(payload: &Value) -> Option<&str> {
-    payload["input"]
-        .as_array()
-        .and_then(|items| {
-            items.iter().rev().find_map(|item| {
-                (item["role"] == "user")
-                    .then_some(item["content"].as_array())
-                    .flatten()
-                    .and_then(|content| content.last())
-                    .and_then(|part| part["text"].as_str())
-            })
+    payload["input"].as_array().and_then(|items| {
+        items.iter().rev().find_map(|item| {
+            (item["role"] == "user")
+                .then_some(item["content"].as_array())
+                .flatten()
+                .and_then(|content| content.last())
+                .and_then(|part| part["text"].as_str())
         })
+    })
 }
 
 fn first_context_id(contexts: &Value) -> u64 {
@@ -2193,16 +2206,14 @@ fn anthropic_last_user_text(payload: &Value) -> Option<&str> {
         })
 }
 
-fn wait_for_http(url: &str) -> impl std::future::Future<Output = anyhow::Result<()>> + '_ {
-    async move {
-        for _ in 0..40 {
-            match Client::new().get(url).send().await {
-                Ok(response) if response.status().is_success() => return Ok(()),
-                _ => tokio::time::sleep(Duration::from_millis(50)).await,
-            }
+async fn wait_for_http(url: &str) -> anyhow::Result<()> {
+    for _ in 0..40 {
+        match Client::new().get(url).send().await {
+            Ok(response) if response.status().is_success() => return Ok(()),
+            _ => tokio::time::sleep(Duration::from_millis(50)).await,
         }
-        anyhow::bail!("server at {url} did not become ready")
     }
+    anyhow::bail!("server at {url} did not become ready")
 }
 
 fn write_executable(path: &Path, contents: &str) -> anyhow::Result<()> {

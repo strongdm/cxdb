@@ -1,3 +1,6 @@
+// Copyright 2025 StrongDM Inc
+// SPDX-License-Identifier: Apache-2.0
+
 use serde_json::Value;
 use std::collections::BTreeMap;
 
@@ -425,7 +428,8 @@ fn is_bootstrap_user_block(block: &Value) -> bool {
     text.starts_with("<system-reminder>")
         && (text.contains("SessionStart hook additional context")
             || text.contains("The following skills are available for use with the Skill tool:")
-            || text.contains("As you answer the user's questions, you can use the following context:"))
+            || text
+                .contains("As you answer the user's questions, you can use the following context:"))
 }
 
 fn parse_assistant_content(

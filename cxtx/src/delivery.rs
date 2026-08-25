@@ -1,3 +1,6 @@
+// Copyright 2025 StrongDM Inc
+// SPDX-License-Identifier: Apache-2.0
+
 use anyhow::{anyhow, Result};
 use std::collections::VecDeque;
 use std::time::Duration;
@@ -28,7 +31,7 @@ enum WorkerMessage {
 #[derive(Debug, Clone)]
 enum QueueItem {
     CreateContext,
-    Append(TurnEnvelope),
+    Append(Box<TurnEnvelope>),
 }
 
 impl DeliveryHandle {
@@ -54,7 +57,7 @@ impl DeliveryHandle {
 
     pub async fn enqueue_turn(&self, turn: TurnEnvelope) -> Result<()> {
         self.tx
-            .send(WorkerMessage::Enqueue(QueueItem::Append(turn)))
+            .send(WorkerMessage::Enqueue(QueueItem::Append(Box::new(turn))))
             .await
             .map_err(|_| anyhow!("delivery worker is no longer running"))
     }
@@ -135,8 +138,9 @@ impl DeliveryWorker {
 
                     if self.degraded && self.queue.is_empty() && !self.recovery_turn_enqueued {
                         self.recovery_turn_enqueued = true;
-                        self.queue
-                            .push_back(QueueItem::Append(self.session.ingest_recovered_turn(0)));
+                        self.queue.push_back(QueueItem::Append(Box::new(
+                            self.session.ingest_recovered_turn(0),
+                        )));
                     } else if self.degraded
                         && self.recovery_turn_enqueued
                         && matches!(item, QueueItem::Append(_))
@@ -223,9 +227,9 @@ impl DeliveryWorker {
 
         self.degraded = true;
         self.recovery_turn_enqueued = false;
-        self.queue.push_back(QueueItem::Append(
+        self.queue.push_back(QueueItem::Append(Box::new(
             self.session.ingest_degraded_turn(self.queue.len(), error),
-        ));
+        )));
         eprintln!("cxtx: CXDB ingest unavailable, entering queued-delivery mode");
     }
 
