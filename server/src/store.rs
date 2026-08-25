@@ -266,23 +266,61 @@ impl Store {
         include_payload: bool,
     ) -> Result<Vec<TurnWithMeta>> {
         let turns = self.turn_store.get_last(context_id, limit)?;
-        let mut out = Vec::with_capacity(turns.len());
-        for record in turns {
-            let meta = self.turn_store.get_turn_meta(record.turn_id)?;
-            let payload = if include_payload {
-                Some(self.blob_store.get(&record.payload_hash)?)
-            } else {
-                None
-            };
-            out.push(TurnWithMeta {
-                record,
-                meta,
-                payload,
-            });
-        }
-        Ok(out)
+        self.hydrate_turns(turns, include_payload)
     }
 
+    /// Hydrate turn metadata and payloads in page order. Blob reads are
+    /// coalesced by the CAS while duplicate payload hashes remain duplicated
+    /// in the returned page.
+    pub fn hydrate_turns(
+        &self,
+        turns: Vec<TurnRecord>,
+        include_payload: bool,
+    ) -> Result<Vec<TurnWithMeta>> {
+        let payloads = if include_payload {
+            let hashes: Vec<_> = turns.iter().map(|turn| turn.payload_hash).collect();
+            Some(self.blob_store.get_many(&hashes)?)
+        } else {
+            None
+        };
+        turns
+            .into_iter()
+            .enumerate()
+            .map(|(index, record)| {
+                let meta = self.turn_store.get_turn_meta(record.turn_id)?;
+                Ok(TurnWithMeta {
+                    record,
+                    meta,
+                    payload: payloads.as_ref().map(|items| items[index].clone()),
+                })
+            })
+            .collect()
+    }
+
+    /// Return one turn only when it belongs to the requested context.
+    pub fn get_turn(&self, turn_id: u64, include_payload: bool) -> Result<TurnWithMeta> {
+        let record = self.turn_store.get_turn(turn_id)?;
+        self.hydrate_turns(vec![record], include_payload)?
+            .into_iter()
+            .next()
+            .ok_or_else(|| StoreError::NotFound("turn".into()))
+    }
+
+    /// Return an exact turn after validating context membership.
+    pub fn get_context_turn(
+        &self,
+        context_id: u64,
+        turn_id: u64,
+        include_payload: bool,
+    ) -> Result<TurnWithMeta> {
+        if !self.turn_store.context_contains_turn(context_id, turn_id)? {
+            return Err(StoreError::NotFound("turn in context".into()));
+        }
+        self.get_turn(turn_id, include_payload)
+    }
+
+    /// Fetch a page before a cursor. Context membership is validated by the
+    /// turn store before the parent chain is traversed.
     pub fn get_before(
         &self,
         context_id: u64,
@@ -293,21 +331,7 @@ impl Store {
         let turns = self
             .turn_store
             .get_before(context_id, before_turn_id, limit)?;
-        let mut out = Vec::with_capacity(turns.len());
-        for record in turns {
-            let meta = self.turn_store.get_turn_meta(record.turn_id)?;
-            let payload = if include_payload {
-                Some(self.blob_store.get(&record.payload_hash)?)
-            } else {
-                None
-            };
-            out.push(TurnWithMeta {
-                record,
-                meta,
-                payload,
-            });
-        }
-        Ok(out)
+        self.hydrate_turns(turns, include_payload)
     }
 
     pub fn get_blob(&self, hash: &[u8; 32]) -> Result<Vec<u8>> {

@@ -17,13 +17,17 @@ use crate::error::{Result, StoreError};
 use crate::events::{EventBus, StoreEvent};
 use crate::fs_store::EntryKind;
 use crate::metrics::{Metrics, SessionTracker};
-use crate::projection::{BytesRender, EnumRender, RenderOptions, TimeRender, U64Format};
+use crate::projection::{
+    assemble_turn_page_json, serialize_turn_page, BytesRender, EnumRender, RenderOptions,
+    TimeRender, TurnProjectionOptions, U64Format,
+};
 use crate::registry::{
     FieldSpec, ItemsSpec, PutOutcome, Registry, RegistryBundle, RendererSpec, TypeVersionSpec,
 };
 use crate::store::Store;
 
 type HttpResponse = (u16, Response<std::io::Cursor<Vec<u8>>>);
+const MAX_HTTP_PAYLOAD_BYTES: usize = 4 * 1024 * 1024;
 
 pub fn start_http(
     bind_addr: String,
@@ -660,14 +664,19 @@ fn handle_request(
                 let type_id = get_required_string(&body, "type_id")?;
                 let type_version = get_required_u32(&body, "type_version")?;
                 let parent_turn_id = get_optional_u64(&body, "parent_turn_id")?.unwrap_or(0);
-                let payload_json = body
-                    .get("data")
-                    .or_else(|| body.get("payload"))
-                    .ok_or_else(|| {
-                        StoreError::InvalidInput("missing required field: data or payload".into())
-                    })?;
-
-                let payload_bytes = {
+                let payload_bytes = if let Some(encoded) =
+                    body.get("payload_base64").and_then(JsonValue::as_str)
+                {
+                    decode_http_payload_base64(encoded)?
+                } else {
+                    let payload_json = body
+                        .get("data")
+                        .or_else(|| body.get("payload"))
+                        .ok_or_else(|| {
+                            StoreError::InvalidInput(
+                                "missing required field: payload_base64, data, or payload".into(),
+                            )
+                        })?;
                     let registry = registry.lock().unwrap();
                     encode_http_payload(payload_json, &type_id, type_version, &registry)?
                 };
@@ -736,6 +745,112 @@ fn handle_request(
                         ),
                 ))
             }
+            (Method::Post, ["v1", "contexts", context_id, "append-batch"]) => {
+                let context_id: u64 = context_id
+                    .parse()
+                    .map_err(|_| StoreError::InvalidInput("invalid context_id".into()))?;
+                let body = parse_json_body(&mut request)?;
+                let items = body
+                    .get("turns")
+                    .or_else(|| body.get("items"))
+                    .and_then(JsonValue::as_array)
+                    .ok_or_else(|| {
+                        StoreError::InvalidInput("missing required field: turns".into())
+                    })?;
+                let registry_guard = registry.lock().unwrap();
+                let mut prepared = Vec::with_capacity(items.len());
+                for (index, item) in items.iter().enumerate() {
+                    match prepare_batch_item(item, &registry_guard) {
+                        Ok(prepared_item) => prepared.push(prepared_item),
+                        Err(error) => {
+                            return batch_failure_response(context_id, &[], index, &error)
+                        }
+                    }
+                }
+                drop(registry_guard);
+
+                // Hold the writer lock for the complete batch. This prevents an
+                // unrelated append from being inserted between two batch items.
+                // Storage is append-only, so a later I/O or parent error cannot
+                // roll back earlier records. Such a failure returns the exact
+                // successful prefix and failed index.
+                let mut store_guard = store.write().unwrap();
+                let mut appended = Vec::with_capacity(prepared.len());
+                let mut current_head = store_guard.get_head(context_id)?.head_turn_id;
+                for (index, (type_id, type_version, payload, requested_parent)) in
+                    prepared.into_iter().enumerate()
+                {
+                    let parent = requested_parent.unwrap_or(current_head);
+                    let hash = blake3::hash(&payload);
+                    let (record, metadata) = match store_guard.append_turn(
+                        context_id,
+                        parent,
+                        type_id.clone(),
+                        type_version,
+                        1,
+                        0,
+                        payload.len() as u32,
+                        *hash.as_bytes(),
+                        &payload,
+                    ) {
+                        Ok(result) => result,
+                        Err(error) => {
+                            drop(store_guard);
+                            return batch_failure_response(context_id, &appended, index, &error);
+                        }
+                    };
+                    current_head = record.turn_id;
+                    event_bus.publish(StoreEvent::TurnAppended {
+                        context_id: context_id.to_string(),
+                        turn_id: record.turn_id.to_string(),
+                        parent_turn_id: record.parent_turn_id.to_string(),
+                        depth: record.depth,
+                        declared_type_id: Some(type_id),
+                        declared_type_version: Some(type_version),
+                    });
+                    if let Some(meta) = metadata {
+                        event_bus.publish(StoreEvent::ContextMetadataUpdated {
+                            context_id: context_id.to_string(),
+                            client_tag: meta.client_tag,
+                            title: meta.title,
+                            labels: meta.labels,
+                            has_provenance: meta.provenance.is_some(),
+                        });
+                        if let Some(prov) = meta.provenance {
+                            if let Some(parent_context_id) = prov.parent_context_id {
+                                event_bus.publish(StoreEvent::ContextLinked {
+                                    child_context_id: context_id.to_string(),
+                                    parent_context_id: parent_context_id.to_string(),
+                                    root_context_id: prov.root_context_id.map(|v| v.to_string()),
+                                    spawn_reason: prov.spawn_reason,
+                                });
+                            }
+                        }
+                    }
+                    appended.push(json!({
+                        "turn_id": format_id(record.turn_id, &U64Format::Number),
+                        "parent_turn_id": format_id(record.parent_turn_id, &U64Format::Number),
+                        "depth": record.depth,
+                        "content_hash": hex::encode(hash.as_bytes()),
+                    }));
+                }
+                drop(store_guard);
+                let bytes = serde_json::to_vec(&json!({
+                    "context_id": format_id(context_id, &U64Format::Number),
+                    "turns": appended,
+                    "partial": false,
+                }))
+                .map_err(|e| StoreError::InvalidInput(format!("json encode error: {e}")))?;
+                Ok((
+                    201,
+                    Response::from_data(bytes)
+                        .with_status_code(StatusCode(201))
+                        .with_header(
+                            Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+                                .unwrap(),
+                        ),
+                ))
+            }
             (Method::Get, ["v1", "contexts", context_id, "turns"]) => {
                 let context_id: u64 = context_id
                     .parse()
@@ -747,8 +862,21 @@ fn handle_request(
                     .unwrap_or(64);
                 let before_turn_id = params
                     .get("before_turn_id")
-                    .and_then(|v| v.parse::<u64>().ok())
+                    .map(|value| {
+                        value
+                            .parse::<u64>()
+                            .map_err(|_| StoreError::InvalidInput("invalid before_turn_id".into()))
+                    })
+                    .transpose()?
                     .unwrap_or(0);
+                let exact_turn_id = params
+                    .get("turn_id")
+                    .map(|value| {
+                        value
+                            .parse::<u64>()
+                            .map_err(|_| StoreError::InvalidInput("invalid turn_id".into()))
+                    })
+                    .transpose()?;
                 let view = params.get("view").map(|v| v.as_str()).unwrap_or("typed");
                 let type_hint_mode = params
                     .get("type_hint_mode")
@@ -777,6 +905,20 @@ fn handle_request(
                     .get("include_unknown")
                     .map(|v| v == "1")
                     .unwrap_or(false);
+                let string_limit = match params.get("string_limit") {
+                    Some(value) => {
+                        let value = value
+                            .parse::<usize>()
+                            .map_err(|_| StoreError::InvalidInput("invalid string_limit".into()))?;
+                        if value > 64 * 1024 {
+                            return Err(StoreError::InvalidInput(
+                                "string_limit exceeds 65536".into(),
+                            ));
+                        }
+                        Some(value)
+                    }
+                    None => None,
+                };
 
                 let as_type_id = params.get("as_type_id").cloned();
                 let as_type_version = params
@@ -789,12 +931,19 @@ fn handle_request(
                     enum_render,
                     time_render,
                     include_unknown,
+                    string_limit: if exact_turn_id.is_some() {
+                        None
+                    } else {
+                        string_limit
+                    },
                 };
 
                 let store = store.read().unwrap();
                 let head = store.get_head(context_id)?;
                 let t0 = Instant::now();
-                let turns = if before_turn_id == 0 {
+                let turns = if let Some(turn_id) = exact_turn_id {
+                    vec![store.get_context_turn(context_id, turn_id, true)?]
+                } else if before_turn_id == 0 {
                     store.get_last(context_id, limit, true)?
                 } else {
                     store.get_before(context_id, before_turn_id, limit, true)?
@@ -802,135 +951,33 @@ fn handle_request(
                 metrics.record_get_last(t0.elapsed());
 
                 let registry = registry.lock().unwrap();
-                let mut out_turns = Vec::new();
-                for item in turns.iter() {
-                    let declared_type_id = item.meta.declared_type_id.clone();
-                    let declared_type_version = item.meta.declared_type_version;
-
-                    let (decoded_type_id, decoded_type_version) = match type_hint_mode {
-                        "explicit" => {
-                            let id = as_type_id.clone().ok_or_else(|| {
-                                StoreError::InvalidInput("as_type_id required".into())
-                            })?;
-                            let ver = as_type_version.ok_or_else(|| {
-                                StoreError::InvalidInput("as_type_version required".into())
-                            })?;
-                            (id, ver)
-                        }
-                        "latest" => {
-                            let latest = registry
-                                .get_latest_type_version(&declared_type_id)
-                                .ok_or_else(|| StoreError::NotFound("type descriptor".into()))?;
-                            (declared_type_id.clone(), latest.version)
-                        }
-                        _ => (declared_type_id.clone(), declared_type_version),
-                    };
-
-                    let mut turn_obj = Map::new();
-                    turn_obj.insert(
-                        "turn_id".into(),
-                        format_id(item.record.turn_id, &u64_format),
-                    );
-                    turn_obj.insert(
-                        "parent_turn_id".into(),
-                        format_id(item.record.parent_turn_id, &u64_format),
-                    );
-                    turn_obj.insert("depth".into(), JsonValue::Number(item.record.depth.into()));
-                    turn_obj.insert(
-                        "declared_type".into(),
-                        json!({
-                            "type_id": declared_type_id,
-                            "type_version": declared_type_version,
-                        }),
-                    );
-
-                    if view == "typed" || view == "both" {
-                        let desc = registry
-                            .get_type_version(&decoded_type_id, decoded_type_version)
-                            .ok_or_else(|| StoreError::NotFound("type descriptor".into()))?;
-                        let payload = item
-                            .payload
-                            .as_ref()
-                            .ok_or_else(|| StoreError::InvalidInput("payload not loaded".into()))?;
-                        let projected =
-                            crate::projection::project_msgpack(payload, desc, &registry, &options)?;
-                        turn_obj.insert(
-                            "decoded_as".into(),
-                            json!({
-                                "type_id": decoded_type_id,
-                                "type_version": decoded_type_version,
-                            }),
-                        );
-                        turn_obj.insert("data".into(), projected.data);
-                        if let Some(unknown) = projected.unknown {
-                            turn_obj.insert("unknown".into(), unknown);
-                        }
-                    }
-
-                    if view == "raw" || view == "both" {
-                        let raw_payload = item
-                            .payload
-                            .as_ref()
-                            .ok_or_else(|| StoreError::InvalidInput("payload not loaded".into()))?;
-                        turn_obj.insert(
-                            "content_hash_b3".into(),
-                            JsonValue::String(hex::encode(item.record.payload_hash)),
-                        );
-                        turn_obj.insert(
-                            "encoding".into(),
-                            JsonValue::Number(item.meta.encoding.into()),
-                        );
-                        turn_obj.insert("compression".into(), JsonValue::Number(0u32.into()));
-                        turn_obj.insert(
-                            "uncompressed_len".into(),
-                            JsonValue::Number((raw_payload.len() as u32).into()),
-                        );
-                        match bytes_render {
-                            BytesRender::Base64 => {
-                                turn_obj.insert(
-                                    "bytes_b64".into(),
-                                    JsonValue::String(
-                                        base64::engine::general_purpose::STANDARD
-                                            .encode(raw_payload),
-                                    ),
-                                );
-                            }
-                            BytesRender::Hex => {
-                                turn_obj.insert(
-                                    "bytes_hex".into(),
-                                    JsonValue::String(hex::encode(raw_payload)),
-                                );
-                            }
-                            BytesRender::LenOnly => {
-                                turn_obj.insert(
-                                    "bytes_len".into(),
-                                    JsonValue::Number((raw_payload.len() as u64).into()),
-                                );
-                            }
-                        }
-                    }
-
-                    out_turns.push(JsonValue::Object(turn_obj));
-                }
-
-                let next_before = turns
-                    .first()
-                    .map(|t| format_id(t.record.turn_id, &u64_format));
-                let meta = json!({
+                let projection_options = TurnProjectionOptions {
+                    view,
+                    type_hint_mode,
+                    as_type_id: as_type_id.as_deref(),
+                    as_type_version,
+                    render: &options,
+                };
+                let serialized_turns = serialize_turn_page(&turns, &registry, &projection_options)?;
+                let next_before = if exact_turn_id.is_some() {
+                    None
+                } else {
+                    turns
+                        .first()
+                        .map(|t| format_id(t.record.turn_id, &u64_format))
+                };
+                let mut meta = json!({
                     "context_id": format_id(context_id, &u64_format),
                     "head_turn_id": format_id(head.head_turn_id, &u64_format),
                     "head_depth": head.head_depth,
                     "registry_bundle_id": registry.last_bundle_id(),
                 });
-
-                let resp = json!({
-                    "meta": meta,
-                    "turns": out_turns,
-                    "next_before_turn_id": next_before,
-                });
-
-                let bytes = serde_json::to_vec(&resp)
-                    .map_err(|e| StoreError::InvalidInput(format!("json encode error: {e}")))?;
+                if exact_turn_id.is_none() {
+                    if let Some(string_limit) = string_limit {
+                        meta["string_limit"] = json!(string_limit);
+                    }
+                }
+                let bytes = assemble_turn_page_json(&meta, next_before, &serialized_turns)?;
                 Ok((
                     200,
                     Response::from_data(bytes)
@@ -1440,6 +1487,69 @@ fn parse_json_u64(value: &JsonValue, field_name: &str) -> Result<u64> {
             .ok_or_else(|| StoreError::InvalidInput(format!("invalid {field_name}"))),
         _ => Err(StoreError::InvalidInput(format!("invalid {field_name}"))),
     }
+}
+
+fn decode_http_payload_base64(encoded: &str) -> Result<Vec<u8>> {
+    let payload = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|e| StoreError::InvalidInput(format!("invalid payload_base64: {e}")))?;
+    if payload.len() > MAX_HTTP_PAYLOAD_BYTES {
+        return Err(StoreError::InvalidInput(
+            "payload_base64 must contain at most 4 MiB".into(),
+        ));
+    }
+    Ok(payload)
+}
+
+fn prepare_batch_item(
+    item: &JsonValue,
+    registry: &Registry,
+) -> Result<(String, u32, Vec<u8>, Option<u64>)> {
+    let type_id = get_required_string(item, "type_id")?;
+    let type_version = get_required_u32(item, "type_version")?;
+    let payload = if let Some(encoded) = item.get("payload_base64").and_then(JsonValue::as_str) {
+        decode_http_payload_base64(encoded)?
+    } else {
+        let value = item
+            .get("data")
+            .or_else(|| item.get("payload"))
+            .ok_or_else(|| {
+                StoreError::InvalidInput(
+                    "missing required field: payload_base64, data, or payload".into(),
+                )
+            })?;
+        encode_http_payload(value, &type_id, type_version, registry)?
+    };
+    let parent = get_optional_u64(item, "parent_turn_id")?;
+    Ok((type_id, type_version, payload, parent))
+}
+
+fn batch_failure_response(
+    context_id: u64,
+    appended: &[JsonValue],
+    failed_index: usize,
+    error: &StoreError,
+) -> Result<HttpResponse> {
+    let (status, message) = map_error(error);
+    let bytes = serde_json::to_vec(&json!({
+        "context_id": format_id(context_id, &U64Format::Number),
+        "turns": appended,
+        "partial": !appended.is_empty(),
+        "failed_index": failed_index,
+        "error": {
+            "code": status,
+            "message": message,
+        },
+    }))
+    .map_err(|e| StoreError::InvalidInput(format!("json encode error: {e}")))?;
+    Ok((
+        status,
+        Response::from_data(bytes)
+            .with_status_code(StatusCode(status))
+            .with_header(
+                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+            ),
+    ))
 }
 
 fn get_required_string(body: &JsonValue, key: &str) -> Result<String> {
@@ -1967,5 +2077,44 @@ mod tests {
         assert!(map.iter().any(|(k, v)| {
             *k == MsgpackValue::from("text") && *v == MsgpackValue::from("hello")
         }));
+    }
+
+    #[test]
+    fn decode_http_payload_base64_accepts_mcp_payloads() {
+        let encoded = base64::engine::general_purpose::STANDARD.encode(b"mcp payload");
+        assert_eq!(
+            decode_http_payload_base64(&encoded).expect("decode payload"),
+            b"mcp payload"
+        );
+    }
+
+    #[test]
+    fn decode_http_payload_base64_rejects_oversized_payloads() {
+        let encoded =
+            base64::engine::general_purpose::STANDARD
+                .encode(vec![0_u8; MAX_HTTP_PAYLOAD_BYTES + 1]);
+        let error = decode_http_payload_base64(&encoded).expect_err("oversized payload");
+        assert!(error.to_string().contains("at most 4 MiB"));
+    }
+
+    #[test]
+    fn batch_failures_preserve_route_status_semantics() {
+        let (conflict_status, _) = batch_failure_response(
+            1,
+            &[json!({"turn_id": 1})],
+            1,
+            &StoreError::NotFound("parent turn".into()),
+        )
+        .expect("conflict response");
+        assert_eq!(conflict_status, 409);
+
+        let (storage_status, _) = batch_failure_response(
+            1,
+            &[],
+            0,
+            &StoreError::Corrupt("blob content hash mismatch".into()),
+        )
+        .expect("storage response");
+        assert_eq!(storage_status, 500);
     }
 }

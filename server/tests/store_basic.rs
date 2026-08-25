@@ -157,6 +157,132 @@ fn indexes_parent_child_context_lineage() {
     assert_eq!(descendants, vec![grandchild.context_id, child.context_id]);
 }
 
+#[test]
+fn exact_turn_and_cursor_are_context_scoped() {
+    let dir = tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open store");
+    let root = store.create_context(0).expect("root");
+    let payload = b"root";
+    let hash = blake3::hash(payload);
+    let (root_turn, _) = store
+        .append_turn(
+            root.context_id,
+            0,
+            "test:Message".into(),
+            1,
+            1,
+            0,
+            payload.len() as u32,
+            *hash.as_bytes(),
+            payload,
+        )
+        .expect("root turn");
+    let child = store.fork_context(root_turn.turn_id).expect("fork");
+    let child_payload = b"child";
+    let child_hash = blake3::hash(child_payload);
+    let (child_turn, _) = store
+        .append_turn(
+            child.context_id,
+            0,
+            "test:Message".into(),
+            1,
+            1,
+            0,
+            child_payload.len() as u32,
+            *child_hash.as_bytes(),
+            child_payload,
+        )
+        .expect("child turn");
+
+    assert!(store
+        .get_context_turn(child.context_id, child_turn.turn_id, true)
+        .is_ok());
+    assert!(store
+        .get_context_turn(root.context_id, child_turn.turn_id, true)
+        .is_err());
+    assert!(store
+        .get_before(root.context_id, child_turn.turn_id, 10, true)
+        .is_err());
+    assert_eq!(
+        store
+            .get_context_turn(child.context_id, root_turn.turn_id, true)
+            .expect("inherited turn")
+            .payload
+            .as_deref(),
+        Some(payload.as_slice())
+    );
+}
+
+#[test]
+fn deep_ancestry_membership_uses_checkpoints() {
+    let dir = tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open store");
+    let context = store.create_context(0).expect("context");
+    let payload = b"same";
+    let hash = blake3::hash(payload);
+    let mut ids = Vec::new();
+    for _ in 0..600 {
+        let (turn, _) = store
+            .append_turn(
+                context.context_id,
+                0,
+                "test:Message".into(),
+                1,
+                1,
+                0,
+                payload.len() as u32,
+                *hash.as_bytes(),
+                payload,
+            )
+            .expect("append");
+        ids.push(turn.turn_id);
+    }
+    assert!(store
+        .get_context_turn(context.context_id, ids[0], false)
+        .is_ok());
+    assert!(store
+        .get_context_turn(context.context_id, ids[599], false)
+        .is_ok());
+}
+
+#[test]
+fn sequential_append_failure_keeps_prior_success() {
+    let dir = tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open store");
+    let context = store.create_context(0).expect("context");
+    let payload = b"first";
+    let hash = blake3::hash(payload);
+    store
+        .append_turn(
+            context.context_id,
+            0,
+            "test:Message".into(),
+            1,
+            1,
+            0,
+            payload.len() as u32,
+            *hash.as_bytes(),
+            payload,
+        )
+        .expect("first append");
+    let failed = store.append_turn(
+        context.context_id,
+        0,
+        "test:Message".into(),
+        1,
+        1,
+        0,
+        payload.len() as u32,
+        [0; 32],
+        payload,
+    );
+    assert!(failed.is_err());
+    assert_eq!(
+        store.get_last(context.context_id, 10, true).unwrap().len(),
+        1
+    );
+}
+
 fn encode_context_metadata_payload(
     parent_context_id: Option<u64>,
     root_context_id: Option<u64>,

@@ -12,6 +12,8 @@ use crc32fast::Hasher;
 
 use crate::error::{Result, StoreError};
 
+const ANCESTRY_BLOCK_SIZE: u32 = 256;
+
 #[derive(Debug, Clone)]
 pub struct TurnRecord {
     pub turn_id: u64,
@@ -57,6 +59,11 @@ pub struct TurnStore {
     turn_index: HashMap<u64, u64>,
     turn_meta: HashMap<u64, TurnMeta>,
     heads: HashMap<u64, ContextHead>,
+    /// Nearest block boundary ancestor for each turn. A map avoids allocating
+    /// a sparse vector when imported turn IDs are large.
+    ancestry_checkpoints: HashMap<u64, u64>,
+    /// The head inherited when each context was created.
+    context_base_turns: HashMap<u64, u64>,
 
     next_turn_id: u64,
     next_context_id: u64,
@@ -108,11 +115,14 @@ impl TurnStore {
             turn_index: HashMap::new(),
             turn_meta: HashMap::new(),
             heads: HashMap::new(),
+            ancestry_checkpoints: HashMap::new(),
+            context_base_turns: HashMap::new(),
             next_turn_id: 1,
             next_context_id: 1,
         };
 
         store.load_turns()?;
+        store.rebuild_ancestry_checkpoints()?;
         store.load_meta()?;
         store.load_heads()?;
         store.rebuild_index()?;
@@ -161,6 +171,38 @@ impl TurnStore {
             offset = self.turns_log.stream_position()?;
         }
         Ok(())
+    }
+
+    fn rebuild_ancestry_checkpoints(&mut self) -> Result<()> {
+        self.ancestry_checkpoints.clear();
+        let mut turn_ids: Vec<_> = self.turns.keys().copied().collect();
+        turn_ids.sort_unstable();
+        for turn_id in turn_ids {
+            let record = self
+                .turns
+                .get(&turn_id)
+                .ok_or_else(|| StoreError::Corrupt("turn disappeared during index build".into()))?;
+            let checkpoint = if record.depth % ANCESTRY_BLOCK_SIZE == 0 {
+                record.turn_id
+            } else if record.parent_turn_id == 0 {
+                return Err(StoreError::Corrupt(
+                    "turn ancestry checkpoint is incomplete".into(),
+                ));
+            } else {
+                *self
+                    .ancestry_checkpoints
+                    .get(&record.parent_turn_id)
+                    .ok_or_else(|| {
+                        StoreError::Corrupt("turn ancestry checkpoint is incomplete".into())
+                    })?
+            };
+            self.ancestry_checkpoints.insert(turn_id, checkpoint);
+        }
+        Ok(())
+    }
+
+    fn checkpoint(&self, turn_id: u64) -> Option<u64> {
+        self.ancestry_checkpoints.get(&turn_id).copied()
     }
 
     fn load_meta(&mut self) -> Result<()> {
@@ -234,6 +276,7 @@ impl TurnStore {
 
     fn load_heads(&mut self) -> Result<()> {
         self.heads.clear();
+        self.context_base_turns.clear();
         self.heads_tbl.seek(SeekFrom::Start(0))?;
         loop {
             let start = self.heads_tbl.stream_position()?;
@@ -302,6 +345,9 @@ impl TurnStore {
                     flags,
                 },
             );
+            self.context_base_turns
+                .entry(context_id)
+                .or_insert(head_turn_id);
         }
         Ok(())
     }
@@ -357,6 +403,7 @@ impl TurnStore {
 
         self.write_head(&head)?;
         self.heads.insert(context_id, head.clone());
+        self.context_base_turns.insert(context_id, head_turn_id);
         Ok(head)
     }
 
@@ -454,6 +501,14 @@ impl TurnStore {
         );
         self.turns.insert(turn_id, record.clone());
         self.turn_index.insert(turn_id, offset);
+        let checkpoint = if depth % ANCESTRY_BLOCK_SIZE == 0 {
+            turn_id
+        } else {
+            self.checkpoint(parent_id).ok_or_else(|| {
+                StoreError::Corrupt("parent ancestry checkpoint is missing".into())
+            })?
+        };
+        self.ancestry_checkpoints.insert(turn_id, checkpoint);
 
         // update head
         let head = ContextHead {
@@ -491,6 +546,44 @@ impl TurnStore {
             .get(&turn_id)
             .cloned()
             .ok_or_else(|| StoreError::NotFound("turn".into()))
+    }
+
+    /// Check membership without walking from the head one edge at a time for
+    /// every block of a deep ancestry chain.
+    pub fn context_contains_turn(&self, context_id: u64, turn_id: u64) -> Result<bool> {
+        let head = self
+            .heads
+            .get(&context_id)
+            .ok_or_else(|| StoreError::NotFound("context".into()))?;
+        let target = self
+            .turns
+            .get(&turn_id)
+            .ok_or_else(|| StoreError::NotFound("turn".into()))?;
+        if target.depth > head.head_depth {
+            return Ok(false);
+        }
+        let mut current_id = head.head_turn_id;
+        let mut current_depth = head.head_depth;
+        while current_depth > target.depth {
+            let distance = current_depth - target.depth;
+            let within_block = current_depth % ANCESTRY_BLOCK_SIZE;
+            if within_block > 0 && within_block <= distance {
+                if let Some(checkpoint) = self.checkpoint(current_id) {
+                    if checkpoint != current_id {
+                        current_id = checkpoint;
+                        current_depth -= within_block;
+                        continue;
+                    }
+                }
+            }
+            let current = self
+                .turns
+                .get(&current_id)
+                .ok_or_else(|| StoreError::Corrupt("context ancestry is incomplete".into()))?;
+            current_id = current.parent_turn_id;
+            current_depth -= 1;
+        }
+        Ok(current_id == turn_id)
     }
 
     pub fn get_turn_meta(&self, turn_id: u64) -> Result<TurnMeta> {
@@ -532,7 +625,14 @@ impl TurnStore {
             .get(&context_id)
             .ok_or_else(|| StoreError::NotFound("context".into()))?;
 
-        if before_turn_id == 0 || head.head_turn_id == 0 {
+        if before_turn_id == 0 {
+            return self.get_last(context_id, limit);
+        }
+
+        if !self.context_contains_turn(context_id, before_turn_id)? {
+            return Err(StoreError::NotFound("turn in context".into()));
+        }
+        if head.head_turn_id == 0 {
             return self.get_last(context_id, limit);
         }
 
@@ -562,14 +662,33 @@ impl TurnStore {
             .get(&context_id)
             .ok_or_else(|| StoreError::NotFound("context".into()))?;
 
-        // Walk back from head to find the turn with depth=0
+        let base_turn_id = self
+            .context_base_turns
+            .get(&context_id)
+            .copied()
+            .ok_or_else(|| StoreError::NotFound("context base".into()))?;
+        if head.head_turn_id == base_turn_id {
+            return Err(StoreError::NotFound("first turn".into()));
+        }
+
+        // Walk back to the first turn owned by this context.
         let mut current = head.head_turn_id;
         while current != 0 {
             let rec = self
                 .turns
                 .get(&current)
                 .ok_or_else(|| StoreError::NotFound("turn".into()))?;
-            if rec.depth == 0 {
+            if base_turn_id == 0 && rec.depth == 0 {
+                return Ok(rec.clone());
+            }
+            if rec.turn_id == base_turn_id {
+                return Err(StoreError::NotFound("first turn".into()));
+            }
+            let parent = self.turns.get(&rec.parent_turn_id);
+            if parent
+                .map(|record| record.turn_id == base_turn_id)
+                .unwrap_or(false)
+            {
                 return Ok(rec.clone());
             }
             current = rec.parent_turn_id;

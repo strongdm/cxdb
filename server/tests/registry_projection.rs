@@ -1,9 +1,11 @@
 // Copyright 2025 StrongDM Inc
 // SPDX-License-Identifier: Apache-2.0
 
-use cxdb_server::projection::project_msgpack;
+use cxdb_server::projection::{project_msgpack, project_turn_page, serialize_turn_page};
 use cxdb_server::projection::{BytesRender, EnumRender, RenderOptions, TimeRender, U64Format};
 use cxdb_server::registry::Registry;
+use cxdb_server::store::TurnWithMeta;
+use cxdb_server::turn_store::{TurnMeta, TurnRecord};
 use rmpv::Value;
 use tempfile::tempdir;
 
@@ -14,6 +16,7 @@ fn default_options() -> RenderOptions {
         enum_render: EnumRender::Label,
         time_render: TimeRender::Iso,
         include_unknown: true,
+        string_limit: None,
     }
 }
 
@@ -68,6 +71,7 @@ fn registry_ingest_and_project() {
         enum_render: EnumRender::Label,
         time_render: TimeRender::Iso,
         include_unknown: true,
+        string_limit: None,
     };
 
     let projection = project_msgpack(&buf, desc, &registry, &options).expect("project");
@@ -732,4 +736,81 @@ fn array_ref_items_include_unknown_tags() {
         second.get("_unknown").is_none(),
         "_unknown should not appear when there are no unknown tags"
     );
+}
+
+#[test]
+fn named_keys_are_recursive_numeric_priority_and_utf8_bounded() {
+    let dir = tempdir().expect("tempdir");
+    let mut registry = Registry::open(dir.path()).expect("open registry");
+    let bundle = r#"{
+      "registry_version": 1, "bundle_id": "named#test",
+      "types": {"test:Message": {"versions": {"1": {"fields": {
+        "1": {"name": "text", "type": "string"},
+        "2": {"name": "count", "type": "u64"}
+      }}}}}
+    }"#;
+    registry
+        .put_bundle("named#test", bundle.as_bytes())
+        .expect("bundle");
+    let desc = registry.get_type_version("test:Message", 1).expect("desc");
+    let value = Value::Map(vec![
+        (Value::String("text".into()), Value::String("named".into())),
+        (Value::Integer(1.into()), Value::String("numeric".into())),
+        (Value::String("1".into()), Value::String("alias".into())),
+        (
+            Value::String("extra".into()),
+            Value::String("éclair".into()),
+        ),
+        (Value::String("count".into()), Value::Integer(7.into())),
+    ]);
+    let mut payload = Vec::new();
+    rmpv::encode::write_value(&mut payload, &value).expect("encode");
+
+    let bounded = RenderOptions {
+        string_limit: Some(4),
+        ..default_options()
+    };
+    let projected = project_msgpack(&payload, desc, &registry, &bounded).expect("project");
+    assert_eq!(projected.data["text"], "nume");
+    assert_eq!(projected.data["count"], "7");
+    assert_eq!(projected.unknown.as_ref().unwrap()["extra"], "écl");
+
+    let record = TurnRecord {
+        turn_id: 9,
+        parent_turn_id: 0,
+        depth: 0,
+        codec: 1,
+        type_tag: 0,
+        payload_hash: *blake3::hash(&payload).as_bytes(),
+        flags: 0,
+        created_at_unix_ms: 0,
+    };
+    let item = TurnWithMeta {
+        record,
+        meta: TurnMeta {
+            declared_type_id: "test:Message".into(),
+            declared_type_version: 1,
+            encoding: 1,
+            compression: 0,
+            uncompressed_len: payload.len() as u32,
+        },
+        payload: Some(payload),
+    };
+    let numeric = RenderOptions {
+        u64_format: U64Format::Number,
+        ..bounded.clone()
+    };
+    let options = cxdb_server::projection::TurnProjectionOptions {
+        view: "typed",
+        type_hint_mode: "inherit",
+        as_type_id: None,
+        as_type_version: None,
+        render: &numeric,
+    };
+    let normal =
+        project_turn_page(std::slice::from_ref(&item), &registry, &options).expect("normal");
+    let fast = serialize_turn_page(std::slice::from_ref(&item), &registry, &options).expect("fast");
+    let fast_json: serde_json::Value = serde_json::from_slice(&fast[0]).expect("fast json");
+    assert_eq!(fast_json, normal[0]);
+    assert_eq!(fast_json["turn_id"], 9);
 }

@@ -1,15 +1,16 @@
 // Copyright 2025 StrongDM Inc
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 #[cfg(unix)]
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use crc32fast::Hasher;
+use rayon::prelude::*;
 
 use crate::error::{Result, StoreError};
 
@@ -296,8 +297,108 @@ impl BlobStore {
         if raw_bytes.len() as u32 != raw_len {
             return Err(StoreError::Corrupt("blob length mismatch".into()));
         }
+        if blake3::hash(&raw_bytes).as_bytes() != hash {
+            return Err(StoreError::Corrupt("blob content hash mismatch".into()));
+        }
 
         Ok(raw_bytes)
+    }
+
+    /// Read several blobs with bounded, coalesced pread operations.
+    ///
+    /// Records are decoded independently after the range read. The returned
+    /// vector has exactly the same order and duplicates as `hashes`.
+    pub fn get_many(&self, hashes: &[[u8; 32]]) -> Result<Vec<Vec<u8>>> {
+        const HEADER_SIZE: u64 = 48;
+        const CRC_SIZE: u64 = 4;
+        const MAX_GAP: u64 = 64 * 1024;
+        const MAX_RANGE: u64 = 16 * 1024 * 1024;
+
+        if hashes.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut unique = Vec::with_capacity(hashes.len());
+        let mut seen = HashSet::with_capacity(hashes.len());
+        for hash in hashes {
+            if seen.insert(*hash) {
+                let entry = self
+                    .index
+                    .get(hash)
+                    .ok_or_else(|| StoreError::NotFound("blob".into()))?
+                    .clone();
+                let end = entry
+                    .offset
+                    .checked_add(HEADER_SIZE)
+                    .and_then(|v| v.checked_add(u64::from(entry.stored_len)))
+                    .and_then(|v| v.checked_add(CRC_SIZE))
+                    .ok_or_else(|| StoreError::Corrupt("blob record offset overflow".into()))?;
+                unique.push((*hash, entry, end));
+            }
+        }
+        unique.sort_unstable_by_key(|(_, entry, _)| entry.offset);
+
+        let pack_len = self.pack_read.metadata()?.len();
+        let mut decoded = HashMap::with_capacity(unique.len());
+        let mut first = 0;
+        while first < unique.len() {
+            let range_start = unique[first].1.offset;
+            let mut range_end = unique[first].2;
+            let mut last = first + 1;
+            while last < unique.len() {
+                let next = &unique[last];
+                if next.1.offset < range_end {
+                    return Err(StoreError::Corrupt("overlapping blob index entries".into()));
+                }
+                let gap = next.1.offset - range_end;
+                let span = next
+                    .2
+                    .checked_sub(range_start)
+                    .ok_or_else(|| StoreError::Corrupt("invalid blob index range".into()))?;
+                if gap > MAX_GAP || span > MAX_RANGE {
+                    break;
+                }
+                range_end = next.2;
+                last += 1;
+            }
+            if range_end > pack_len {
+                return Err(StoreError::Corrupt(
+                    "blob index points past pack end".into(),
+                ));
+            }
+            let range_len = usize::try_from(range_end - range_start)
+                .map_err(|_| StoreError::Corrupt("blob read range exceeds address space".into()))?;
+            let mut range = vec![0u8; range_len];
+            self.read_at_exact(range_start, &mut range)?;
+            let group: Result<Vec<([u8; 32], Vec<u8>)>> = unique[first..last]
+                .par_iter()
+                .map(|(hash, entry, end)| {
+                    let start = usize::try_from(entry.offset - range_start).map_err(|_| {
+                        StoreError::Corrupt("blob offset exceeds address space".into())
+                    })?;
+                    let end = usize::try_from(*end - range_start).map_err(|_| {
+                        StoreError::Corrupt("blob record exceeds address space".into())
+                    })?;
+                    let record = range.get(start..end).ok_or_else(|| {
+                        StoreError::Corrupt("blob record outside read range".into())
+                    })?;
+                    Ok((*hash, decode_blob_record_slice(record, hash, entry)?))
+                })
+                .collect();
+            for (hash, payload) in group? {
+                decoded.insert(hash, payload);
+            }
+            first = last;
+        }
+
+        hashes
+            .iter()
+            .map(|hash| {
+                decoded
+                    .get(hash)
+                    .cloned()
+                    .ok_or_else(|| StoreError::NotFound("blob".into()))
+            })
+            .collect()
     }
 
     /// Read exactly buf.len() bytes from the read handle at the given offset using pread.
@@ -335,6 +436,59 @@ impl BlobStore {
     }
 }
 
+fn decode_blob_record_slice(
+    record: &[u8],
+    expected_hash: &[u8; 32],
+    expected_entry: &BlobIndexEntry,
+) -> Result<Vec<u8>> {
+    const HEADER_SIZE: usize = 48;
+    let expected_len = HEADER_SIZE
+        .checked_add(expected_entry.stored_len as usize)
+        .and_then(|v| v.checked_add(4))
+        .ok_or_else(|| StoreError::Corrupt("blob record length overflow".into()))?;
+    if record.len() != expected_len {
+        return Err(StoreError::Corrupt("blob record length mismatch".into()));
+    }
+    let mut header = Cursor::new(&record[..HEADER_SIZE]);
+    let magic = header.read_u32::<LittleEndian>()?;
+    let version = header.read_u16::<LittleEndian>()?;
+    let codec_raw = header.read_u16::<LittleEndian>()?;
+    let raw_len = header.read_u32::<LittleEndian>()?;
+    let stored_len = header.read_u32::<LittleEndian>()?;
+    let mut stored_hash = [0u8; 32];
+    header.read_exact(&mut stored_hash)?;
+    if magic != BLOB_MAGIC || version != BLOB_VERSION {
+        return Err(StoreError::Corrupt("invalid blob header".into()));
+    }
+    if &stored_hash != expected_hash
+        || raw_len != expected_entry.raw_len
+        || stored_len != expected_entry.stored_len
+        || codec_raw != expected_entry.codec as u16
+    {
+        return Err(StoreError::Corrupt("blob index/header mismatch".into()));
+    }
+    let stored_end = HEADER_SIZE + stored_len as usize;
+    let stored = &record[HEADER_SIZE..stored_end];
+    let crc = Cursor::new(&record[stored_end..]).read_u32::<LittleEndian>()?;
+    let mut hasher = Hasher::new();
+    hasher.update(&record[..stored_end]);
+    if crc != hasher.finalize() {
+        return Err(StoreError::Corrupt("blob crc mismatch".into()));
+    }
+    let raw = match expected_entry.codec {
+        BlobCodec::None => stored.to_vec(),
+        BlobCodec::Zstd => zstd::decode_all(stored)
+            .map_err(|e| StoreError::Corrupt(format!("zstd decode failed: {e}")))?,
+    };
+    if raw.len() != raw_len as usize {
+        return Err(StoreError::Corrupt("blob length mismatch".into()));
+    }
+    if blake3::hash(&raw).as_bytes() != expected_hash {
+        return Err(StoreError::Corrupt("blob content hash mismatch".into()));
+    }
+    Ok(raw)
+}
+
 #[derive(Debug, Clone)]
 pub struct BlobStoreStats {
     pub blobs_total: usize,
@@ -344,4 +498,29 @@ pub struct BlobStoreStats {
 
 fn file_len(path: &PathBuf) -> u64 {
     std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BlobStore;
+    use tempfile::tempdir;
+
+    #[test]
+    fn get_many_preserves_order_and_duplicates() {
+        let dir = tempdir().expect("tempdir");
+        let mut store = BlobStore::open(dir.path()).expect("open");
+        let first = b"first payload";
+        let second = b"second payload";
+        let first_hash = *blake3::hash(first).as_bytes();
+        let second_hash = *blake3::hash(second).as_bytes();
+        store.put_if_absent(first_hash, first).expect("first");
+        store.put_if_absent(second_hash, second).expect("second");
+        let values = store
+            .get_many(&[second_hash, first_hash, second_hash])
+            .expect("batch read");
+        assert_eq!(
+            values,
+            vec![second.to_vec(), first.to_vec(), second.to_vec()]
+        );
+    }
 }
