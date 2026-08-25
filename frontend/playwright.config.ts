@@ -5,6 +5,8 @@ import { defineConfig, devices } from '@playwright/test';
 
 // When using external servers (CXDB_TEST_ADDR is set), skip local server management
 const useExternalServer = !!process.env.CXDB_TEST_ADDR;
+const frontendPort = Number(process.env.CXDB_TEST_FRONTEND_PORT ?? '3000');
+const frontendURL = `http://127.0.0.1:${frontendPort}`;
 
 /**
  * Playwright configuration for CXDB integration tests.
@@ -41,7 +43,7 @@ export default defineConfig({
 
   use: {
     // Base URL for the Next.js dev server
-    baseURL: 'http://localhost:3000',
+    baseURL: frontendURL,
 
     // Collect trace on first retry
     trace: 'on-first-retry',
@@ -55,8 +57,8 @@ export default defineConfig({
 
   // Start the Next.js dev server before tests
   webServer: {
-    command: 'pnpm dev',
-    url: 'http://localhost:3000',
+    command: `CXDB_NEXT_DIST_DIR=.next-playwright-${frontendPort} pnpm exec next dev --hostname 127.0.0.1 --port ${frontendPort}`,
+    url: frontendURL,
     reuseExistingServer: !process.env.CI,
     timeout: 120000, // 2 minutes to start
   },

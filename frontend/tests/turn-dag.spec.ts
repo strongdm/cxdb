@@ -8,6 +8,7 @@ import {
   waitForDebuggerLoaded,
   selectTimelineItem,
   expandTurnMetadata,
+  getRawPayload,
 } from './utils/assertions';
 
 test.describe('Turn DAG Structure', () => {
@@ -176,5 +177,42 @@ test.describe('Turn DAG Structure', () => {
 
     const firstTurn = data.turns[0];
     expect(parseInt(firstTurn.parent_turn_id)).toBe(0);
+  });
+
+  test('deep link hydrates a turn outside the first page', async ({
+    apiPage,
+    goWriter,
+    registry,
+    serverHttpUrl,
+  }) => {
+    const ctx = goWriter.createContext();
+    await registry.putBundle('test-bundle-v1');
+    const response = await fetch(
+      `${serverHttpUrl}/v1/contexts/${ctx.contextId}/append-batch`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          turns: Array.from({ length: 105 }, (_, index) => ({
+            type_id: 'com.yourorg.ai.MessageTurn',
+            type_version: 1,
+            data: {
+              role: index % 2 === 0 ? 'user' : 'assistant',
+              text: index === 0 ? 'deep-linked oldest turn' : `turn ${index}`,
+            },
+          })),
+        }),
+      }
+    );
+    expect(response.status).toBe(201);
+    const result = await response.json();
+    const linkedTurnId = String(result.turns[0].turn_id);
+
+    await apiPage.goto(`/c/${ctx.contextId}/t/${linkedTurnId}`);
+    await waitForDebugger(apiPage);
+    await waitForDebuggerLoaded(apiPage);
+
+    await expect(apiPage.locator(`[data-turn-id="${linkedTurnId}"]`)).toBeVisible();
+    await expect(await getRawPayload(apiPage)).toContainText('deep-linked oldest turn');
   });
 });

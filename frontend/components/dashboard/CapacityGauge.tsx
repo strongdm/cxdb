@@ -1,3 +1,6 @@
+// Copyright 2025 StrongDM Inc
+// SPDX-License-Identifier: Apache-2.0
+
 'use client';
 
 import { cn } from '@/lib/utils';
@@ -79,9 +82,9 @@ export function CapacityGauge({
 
       {/* Main horizontal gauge */}
       <div className="bg-theme-bg-tertiary/50 border border-theme-border rounded-lg p-4">
-        <div className="flex items-center justify-between mb-2">
+        <div className="mb-2 flex flex-col items-start justify-between gap-1 sm:flex-row sm:items-center">
           <h3 className="text-sm font-medium text-theme-text-secondary">In-Memory Index Capacity</h3>
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
             <span className={cn('text-lg font-bold', levelColor)}>
               {(capacityRatio * 100).toFixed(0)}%
             </span>

@@ -36,6 +36,8 @@ pnpm-debug.log*
 dist/
 build/
 .next/
+.next-build/
+.next-playwright-*/
 out/
 .turbo/
 .vercel/

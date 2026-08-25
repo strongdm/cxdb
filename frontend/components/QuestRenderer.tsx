@@ -1,3 +1,6 @@
+// Copyright 2025 StrongDM Inc
+// SPDX-License-Identifier: Apache-2.0
+
 'use client';
 
 import { useState } from 'react';
@@ -157,7 +160,7 @@ function ActionSummaryCard({ summary }: { summary: ActionSummary }) {
   const skipped = Number(summary.skipped) || 0;
 
   return (
-    <div className="grid grid-cols-4 gap-2 text-center">
+    <div className="grid grid-cols-2 gap-2 text-center sm:grid-cols-4">
       <div className="bg-theme-bg-tertiary/50 rounded-lg p-2">
         <div className="text-lg font-bold text-theme-text-secondary">{total}</div>
         <div className="text-[10px] text-theme-text-dim uppercase">Total</div>

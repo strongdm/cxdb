@@ -8,10 +8,18 @@ The CXDB HTTP gateway provides a JSON API for reading turns, managing contexts, 
 
 **Development:** No authentication required when connecting directly to the Rust server
 
-**Production:** The Go gateway provides Google OAuth authentication:
-- Unauthenticated requests to `/v1/*` return `302 Found` redirect to `/login`
-- After OAuth, requests include session cookie
-- Session expires after 24 hours of inactivity
+**Gateway authentication:** The Go gateway uses the configured OIDC provider
+for browser sessions. Clients may also send a personal bearer token:
+
+```http
+Authorization: Bearer <token>
+```
+
+Read requests require `cxdb:read`. Context creation and turn append requests
+also require `cxdb:write`. The Web UI creates and revokes tokens. A token
+secret is shown only once. Do not put tokens in URLs or browser storage.
+
+See [client authentication](client-authentication.md) and [MCP guidance](mcp.md).
 
 ## Contexts
 

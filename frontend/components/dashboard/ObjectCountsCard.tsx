@@ -1,3 +1,6 @@
+// Copyright 2025 StrongDM Inc
+// SPDX-License-Identifier: Apache-2.0
+
 'use client';
 
 import { cn } from '@/lib/utils';
@@ -29,21 +32,21 @@ export function ObjectCountsCard({ objects, previousObjects, filesystem, classNa
       </div>
 
       {/* Main counts */}
-      <div className="grid grid-cols-3 gap-4 mb-4">
+      <div className="mb-4 grid grid-cols-3 gap-2 sm:gap-4">
         <div className="text-center">
-          <div className="text-2xl font-bold text-theme-text">
+          <div className="text-xl font-bold text-theme-text sm:text-2xl">
             {formatCount(objects.contexts_total)}
           </div>
           <div className="text-xs text-theme-text-dim">contexts</div>
         </div>
         <div className="text-center">
-          <div className="text-2xl font-bold text-theme-text">
+          <div className="text-xl font-bold text-theme-text sm:text-2xl">
             {formatCount(objects.turns_total)}
           </div>
           <div className="text-xs text-theme-text-dim">turns</div>
         </div>
         <div className="text-center">
-          <div className="text-2xl font-bold text-theme-text">
+          <div className="text-xl font-bold text-theme-text sm:text-2xl">
             {formatCount(objects.blobs_total)}
           </div>
           <div className="text-xs text-theme-text-dim">blobs</div>

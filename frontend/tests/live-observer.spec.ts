@@ -7,42 +7,90 @@ import { test as base, expect, Page } from '@playwright/test';
  * Live Observer Tests
  *
  * These tests verify the real-time streaming UI features (Sprint 006).
- * They enable mock mode to simulate SSE events without requiring
- * the backend SSE infrastructure.
+ * They use mock mode (which is enabled by default) to simulate SSE events
+ * without requiring the backend SSE infrastructure.
  */
+
+async function ensureDemoRunning(page: Page): Promise<void> {
+  const stopDemoButton = page.getByRole('button', { name: 'Stop demo' });
+  if (await stopDemoButton.isVisible().catch(() => false)) {
+    return;
+  }
+
+  await page.getByRole('button', { name: 'Start demo' }).click();
+  await expect(stopDemoButton).toBeVisible();
+}
+
+async function installMockApiRoutes(page: Page): Promise<void> {
+  // Prevent Next dev rewrites from trying to proxy to 127.0.0.1:9010 during UI-only tests.
+  await page.route('**/healthz', async (route) => {
+    await route.fulfill({ status: 200, body: '' });
+  });
+
+  await page.route('**/v1/**', async (route) => {
+    const url = new URL(route.request().url());
+
+    // Minimal SSE stub.
+    if (url.pathname === '/v1/events') {
+      await route.fulfill({
+        status: 200,
+        headers: {
+          'content-type': 'text/event-stream',
+          'cache-control': 'no-cache',
+          connection: 'keep-alive',
+        },
+        body: 'event: connected\ndata: {}\n\n',
+      });
+      return;
+    }
+
+    // Minimal contexts list/search responses for initial page load.
+    if (url.pathname === '/v1/contexts') {
+      await route.fulfill({
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ contexts: [], count: 0 }),
+      });
+      return;
+    }
+    if (url.pathname === '/v1/contexts/search') {
+      await route.fulfill({
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ contexts: [], total_count: 0, elapsed_ms: 0, query: '' }),
+      });
+      return;
+    }
+
+    await route.fulfill({ status: 404, body: '' });
+  });
+}
 
 // Simple test that doesn't require the full server fixtures
 const test = base;
 
-/** Enable mock mode by clicking the Live Mode toggle button. */
-async function enableMockMode(page: Page) {
-  const toggle = page.getByRole('button', { name: 'Live Mode' });
-  await expect(toggle).toBeVisible();
-  await toggle.click();
-  // After clicking, the button text changes to "Mock Mode"
-  await expect(page.getByRole('button', { name: 'Mock Mode' })).toBeVisible();
-}
-
 test.describe('Live Observer UI', () => {
   test.beforeEach(async ({ page }) => {
+    await installMockApiRoutes(page);
     await page.goto('/');
-    // Wait for initial render
-    await page.waitForSelector('text=CXDB');
-    // Enable mock mode (defaults to Live Mode)
-    await enableMockMode(page);
+    await expect(page.getByRole('heading', { name: 'CXDB' })).toBeVisible();
+    await ensureDemoRunning(page);
   });
 
-  test('displays mock mode indicator', async ({ page }) => {
-    await expect(page.getByRole('button', { name: 'Mock Mode' })).toBeVisible();
+  test('displays one demo control', async ({ page }) => {
+    await expect(page.getByRole('button', { name: 'Stop demo' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Start demo' })).toHaveCount(0);
   });
 
-  test('displays live connection status badge', async ({ page }) => {
-    // Should show "Live" badge when in mock mode
-    await expect(page.locator('text=Live').first()).toBeVisible();
+  test('displays combined server status', async ({ page }) => {
+    await expect(page.getByRole('status', { name: 'Server online' })).toBeVisible();
   });
 
-  test('shows demo button in mock mode', async ({ page }) => {
-    await expect(page.getByRole('button', { name: /Start Demo/i })).toBeVisible();
+  test('stops and can restart the demo', async ({ page }) => {
+    await page.getByRole('button', { name: 'Stop demo' }).click();
+    await expect(page.getByRole('button', { name: 'Start demo' })).toBeVisible();
+    await page.getByRole('button', { name: 'Start demo' }).click();
+    await expect(page.getByRole('button', { name: 'Stop demo' })).toBeVisible();
   });
 
   test('can toggle between Contexts and Activity tabs', async ({ page }) => {
@@ -72,10 +120,7 @@ test.describe('Live Observer UI', () => {
     await expect(page.getByText('No activity yet')).not.toBeVisible();
   });
 
-  test('Start Demo button generates events', async ({ page }) => {
-    // Click Start Demo
-    await page.getByRole('button', { name: /Start Demo/i }).click();
-
+  test('demo generates events', async ({ page }) => {
     // Wait for some events to be generated
     await page.waitForTimeout(5000);
 
@@ -89,9 +134,6 @@ test.describe('Live Observer UI', () => {
   });
 
   test('new contexts appear with animation class', async ({ page }) => {
-    // Start demo to generate events
-    await page.getByRole('button', { name: /Start Demo/i }).click();
-
     // Wait for activity to appear (which confirms events are being generated)
     await page.locator('button:has-text("Activity")').click();
 
@@ -114,14 +156,13 @@ test.describe('Live Observer UI', () => {
 
 test.describe('Live Observer Animations', () => {
   test.beforeEach(async ({ page }) => {
+    await installMockApiRoutes(page);
     await page.goto('/');
-    await page.waitForSelector('text=CXDB');
-    await enableMockMode(page);
+    await expect(page.getByRole('heading', { name: 'CXDB' })).toBeVisible();
+    await ensureDemoRunning(page);
   });
 
   test('presence indicators have breathe animation', async ({ page }) => {
-    // Start demo to create a live context
-    await page.getByRole('button', { name: /Start Demo/i }).click();
     await page.waitForTimeout(4000);
 
     // Check for presence indicator with animation
@@ -134,9 +175,6 @@ test.describe('Live Observer Animations', () => {
   test('activity items slide in', async ({ page }) => {
     // Switch to activity tab
     await page.locator('button:has-text("Activity")').click();
-
-    // Start demo
-    await page.getByRole('button', { name: /Start Demo/i }).click();
 
     // Wait for an activity item
     await page.waitForTimeout(3000);
@@ -152,13 +190,15 @@ test.describe('Reduced Motion Support', () => {
   test('respects prefers-reduced-motion', async ({ page }) => {
     // Emulate reduced motion preference
     await page.emulateMedia({ reducedMotion: 'reduce' });
+    await installMockApiRoutes(page);
     await page.goto('/');
-    await page.waitForSelector('text=CXDB');
-    await enableMockMode(page);
+
+    // The page should load without errors
+    await expect(page.getByRole('heading', { name: 'CXDB' })).toBeVisible();
+    await ensureDemoRunning(page);
 
     // Animations should be disabled (CSS handles this via media query)
     // We just verify the page still works
-    await page.getByRole('button', { name: /Start Demo/i }).click();
     await page.waitForTimeout(2000);
 
     // Should still function normally
@@ -169,12 +209,10 @@ test.describe('Reduced Motion Support', () => {
 
 test.describe('Relative Timestamps', () => {
   test('timestamps update over time', async ({ page }) => {
+    await installMockApiRoutes(page);
     await page.goto('/');
-    await page.waitForSelector('text=CXDB');
-    await enableMockMode(page);
-
-    // Start demo to generate events
-    await page.getByRole('button', { name: /Start Demo/i }).click();
+    await expect(page.getByRole('heading', { name: 'CXDB' })).toBeVisible();
+    await ensureDemoRunning(page);
     await page.waitForTimeout(2500);
 
     // Switch to activity to see timestamps

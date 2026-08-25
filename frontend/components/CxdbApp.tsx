@@ -1,18 +1,22 @@
+// Copyright 2025 StrongDM Inc
+// SPDX-License-Identifier: Apache-2.0
+
 'use client';
 
 import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { ContextDebugger } from '@/components/ContextDebugger';
 import { ContextList } from '@/components/ContextList';
 import type { ContextEntry, StoreEvent } from '@/types';
-import { Database, Layers, Plus, X, AlertCircle, Check, Zap, Radio, ChevronDown, Filter } from '@/components/icons';
+import { Database, Layers, Plus, X, AlertCircle, Check, Radio, ChevronDown, Filter, Lock } from '@/components/icons';
 import { ThemeSelector } from '@/components/ThemeSelector';
 import { getTagColor } from '@/lib/clientTags';
 import { cn, normalizeContextId } from '@/lib/utils';
 import { healthCheck, fetchContexts, searchContexts } from '@/lib/api';
 import { validate as validateCql, buildFallbackQuery, appendSearchCriterionClause, extractSearchCriteriaClauses } from '@/lib/cql';
 import { useEventStream, useMockEventGenerator, useUrlRouter, parseUrl, type RouteState } from '@/hooks';
-import { ConnectionStatus, ActivityFeed } from '@/components/live';
+import { ActivityFeed } from '@/components/live';
 import { ServerHealthDashboard } from '@/components/dashboard';
+import { TokenManagement } from '@/components/TokenManagement';
 
 export default function CxdbApp() {
   const [contexts, setContexts] = useState<ContextEntry[]>([]);
@@ -37,6 +41,7 @@ export default function CxdbApp() {
 
   // Environment filter state
   const [selectedEnv, setSelectedEnv] = useState<'all' | 'prod' | 'stage' | 'dev'>('all');
+  const [tokenManagementOpen, setTokenManagementOpen] = useState(false);
 
   // URL routing - parse URL on mount and handle changes
   const handleRouteChange = useCallback((state: RouteState) => {
@@ -185,6 +190,14 @@ export default function CxdbApp() {
 
   // Mock event generator for demo
   const { startMockEvents, stopMockEvents } = useMockEventGenerator(mockEmit);
+
+  // One demo control owns the generator lifecycle. This also makes the demo
+  // useful on touch devices without a second hidden action.
+  useEffect(() => {
+    if (!mockMode) return;
+    startMockEvents(2000);
+    return stopMockEvents;
+  }, [mockMode, startMockEvents, stopMockEvents]);
 
   // Fetch contexts helper
   const fetchContextsData = useCallback(async () => {
@@ -424,7 +437,7 @@ export default function CxdbApp() {
       if (e.metaKey || e.ctrlKey || e.altKey) return;
 
       // Only handle j/k/o when debugger is closed and viewing contexts (not activity)
-      if (!debuggerOpen && !showActivityFeed) {
+      if (!debuggerOpen && !showActivityFeed && !tokenManagementOpen) {
         if (e.key === 'j' || e.key === 'ArrowDown') {
           e.preventDefault();
           setFocusedContextIndex(prev =>
@@ -454,35 +467,35 @@ export default function CxdbApp() {
     };
     window.addEventListener('keydown', handleKey);
     return () => window.removeEventListener('keydown', handleKey);
-  }, [debuggerOpen, showActivityFeed, filteredContexts, focusedContextIndex, handleSelectContext]);
+  }, [debuggerOpen, showActivityFeed, tokenManagementOpen, filteredContexts, focusedContextIndex, handleSelectContext]);
 
   return (
-    <div className="h-screen flex flex-col overflow-hidden">
+    <div className="flex h-[100dvh] min-h-0 flex-col overflow-hidden">
       {/* Header */}
-      <header className="h-14 px-4 border-b border-theme-border-dim bg-theme-bg-secondary/50 flex items-center justify-between shrink-0">
+      <header className="flex min-h-14 shrink-0 flex-col gap-2 border-b border-theme-border-dim bg-theme-bg-secondary/50 px-3 py-2 sm:h-14 sm:flex-row sm:items-center sm:justify-between sm:gap-3 sm:px-4 sm:py-0">
         {/* Left: Logo + Title + Env Pills */}
-        <div className="flex items-center gap-3">
+        <div className="flex min-w-0 items-center gap-2 sm:gap-3">
           <a
             href="/"
-            className="flex items-center gap-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-theme-accent/30"
+            className="flex shrink-0 items-center gap-2 rounded-lg focus:outline-none focus:ring-2 focus:ring-theme-accent/30 sm:gap-3"
           >
-            <div className="w-8 h-8 rounded-lg bg-theme-accent-muted border border-theme-accent/30 flex items-center justify-center">
+            <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-theme-accent/30 bg-theme-accent-muted">
               <Database className="w-4 h-4 text-theme-accent" />
             </div>
             <div>
               <h1 className="text-sm font-semibold text-theme-text">CXDB</h1>
-              <p className="text-xs text-theme-text-dim">AI Context Store</p>
+              <p className="hidden text-xs text-theme-text-dim sm:block">AI Context Store</p>
             </div>
           </a>
 
           {/* Environment Filter Pills - vertically centered with logo */}
-          <div className="flex items-center gap-1 p-0.5 bg-theme-bg-tertiary/50 rounded-lg ml-4">
+          <div className="ml-auto flex min-w-0 items-center gap-0.5 overflow-x-auto rounded-lg bg-theme-bg-tertiary/50 p-0.5 sm:ml-4 sm:gap-1">
             {(['all', 'prod', 'stage', 'dev'] as const).map((env) => (
               <button
                 key={env}
                 onClick={() => handleEnvSelect(env)}
                 className={cn(
-                  'px-3 py-1.5 text-xs font-medium rounded-md transition-all',
+                  'shrink-0 rounded-md px-2 py-1.5 text-xs font-medium transition-all sm:px-3',
                   selectedEnv === env
                     ? env === 'prod'
                       ? 'bg-red-600/20 text-red-400 shadow-sm'
@@ -501,78 +514,68 @@ export default function CxdbApp() {
         </div>
 
         {/* Right: Controls */}
-        <div className="flex items-center gap-3">
-          {/* Theme selector */}
+        <div className="flex w-full min-w-0 items-center justify-between gap-1 overflow-visible sm:w-auto sm:justify-end sm:gap-3">
           <ThemeSelector />
 
-          {/* Mock mode toggle */}
+          <button
+            type="button"
+            onClick={() => setTokenManagementOpen(true)}
+            className="flex shrink-0 items-center gap-2 rounded-full border border-theme-border bg-theme-bg-hover/50 px-2.5 py-1.5 text-xs text-theme-text-muted transition-colors hover:border-theme-accent/40 hover:bg-theme-accent-muted hover:text-theme-text sm:py-1"
+            aria-label="Manage API tokens"
+          >
+            <Lock className="h-3 w-3" />
+            <span className="hidden sm:inline">API tokens</span>
+          </button>
+
           <button
             onClick={() => {
-              if (!mockMode) {
-                setMockMode(true);
-              } else {
+              if (mockMode) {
                 stopMockEvents();
                 setMockMode(false);
+              } else {
+                setMockMode(true);
               }
             }}
             className={cn(
-              'flex items-center gap-2 px-2.5 py-1 rounded-full text-xs transition-colors',
+              'flex shrink-0 items-center gap-2 rounded-full border px-2.5 py-1.5 text-xs transition-colors sm:py-1',
               mockMode
-                ? 'bg-amber-600/20 text-amber-400 border border-amber-500/30'
-                : 'bg-theme-bg-hover/50 text-theme-text-muted border border-theme-border'
+                ? 'border-amber-500/30 bg-amber-600/20 text-amber-400'
+                : 'border-theme-accent/30 bg-theme-accent-muted text-theme-accent hover:bg-theme-accent/30'
             )}
+            aria-label={mockMode ? 'Stop demo' : 'Start demo'}
+            title={mockMode ? 'Stop demo' : 'Start demo'}
           >
-            <Zap className="w-3 h-3" />
-            {mockMode ? 'Mock Mode' : 'Live Mode'}
+            <Radio className="w-3 h-3" />
+            <span className="hidden sm:inline">{mockMode ? 'Stop Demo' : 'Start Demo'}</span>
           </button>
 
-          {/* Demo button (mock mode only) */}
-          {mockMode && (
-            <button
-              onClick={() => startMockEvents(2000)}
-              className="flex items-center gap-2 px-2.5 py-1 rounded-full text-xs bg-theme-accent-muted text-theme-accent border border-theme-accent/30 hover:bg-theme-accent/30 transition-colors"
-            >
-              <Radio className="w-3 h-3" />
-              Start Demo
-            </button>
-          )}
-
-          {/* Connection status */}
-          <ConnectionStatus
-            state={mockMode ? 'connected' : connectionState}
-            variant="badge"
-          />
-
-          {/* Server status indicator */}
           <div className={cn(
-            'flex items-center gap-2 px-2.5 py-1 rounded-full text-xs',
+            'flex shrink-0 items-center gap-2 px-0 py-1.5 text-xs text-theme-text-muted',
             serverStatus === 'online' && 'bg-emerald-600/20 text-emerald-400',
             serverStatus === 'offline' && 'bg-red-600/20 text-red-400',
             serverStatus === 'checking' && 'bg-theme-bg-hover/50 text-theme-text-muted'
-          )}>
+          )} role="status" aria-label={serverStatus === 'online' ? 'Server online' : serverStatus === 'offline' ? 'Server offline' : 'Checking server status'}>
             <span className={cn(
-              'w-1.5 h-1.5 rounded-full',
+              'h-2 w-2 rounded-full',
               serverStatus === 'online' && 'bg-emerald-400',
               serverStatus === 'offline' && 'bg-red-400',
               serverStatus === 'checking' && 'bg-theme-text-muted animate-pulse'
             )} />
-            {serverStatus === 'online' ? 'Server online' :
-             serverStatus === 'offline' ? 'Server offline' :
-             'Checking...'}
+            <span className="hidden lg:inline">{serverStatus === 'online' ? 'Server online' : serverStatus === 'offline' ? 'Server offline' : 'Checking...'}</span>
           </div>
         </div>
       </header>
 
       {/* Main content */}
-      <div className="flex-1 flex min-h-0">
+      <div className="flex min-h-0 flex-1 flex-col md:flex-row">
         {/* Sidebar */}
-        <aside className="w-72 border-r border-theme-border-dim bg-theme-bg-secondary/30 flex flex-col min-h-0">
+        <aside className="flex h-[52%] min-h-[16rem] w-full shrink-0 flex-col border-b border-theme-border-dim bg-theme-bg-secondary/30 md:h-auto md:min-h-0 md:w-72 md:border-b-0 md:border-r">
           {/* CQL Search */}
           <div className="p-3 border-b border-theme-border-dim">
             <label className="text-xs text-theme-text-dim mb-1.5 block">
               Search (CQL)
               <a
-                href="https://github.com/microsoft/ai-cxdb/blob/main/docs/CQL_REFERENCE.md"
+                href="https://github.com/strongdm/cxdb/blob/main/docs/CQL_REFERENCE.md"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="ml-2 text-theme-accent hover:text-theme-accent-dim"
@@ -774,7 +777,7 @@ export default function CxdbApp() {
                           Clear filter
                         </button>
                       ) : mockMode ? (
-                        'Click "Start Demo" to see live events'
+                        'Demo events will appear here.'
                       ) : (
                         'Enter a context ID above.'
                       )}
@@ -797,7 +800,7 @@ export default function CxdbApp() {
         </aside>
 
         {/* Main area */}
-        <main className="flex-1 flex items-start justify-center bg-theme-bg pt-8 overflow-y-auto">
+        <main className="flex min-h-0 flex-1 items-start justify-center overflow-y-auto bg-theme-bg pt-2 sm:pt-4 md:pt-8">
           {!debuggerOpen && (
             <ServerHealthDashboard
               enabled={serverStatus === 'online' || mockMode}
@@ -808,7 +811,7 @@ export default function CxdbApp() {
       </div>
 
       {/* Keyboard hints footer */}
-      <footer className="h-8 px-4 border-t border-theme-border-dim bg-theme-bg-secondary/30 flex items-center text-xs text-theme-text-faint">
+      <footer className="hidden h-8 items-center border-t border-theme-border-dim bg-theme-bg-secondary/30 px-4 text-xs text-theme-text-faint md:flex">
         <span><kbd>j</kbd>/<kbd>k</kbd> Navigate</span>
         <span className="mx-3 text-theme-border">|</span>
         <span><kbd>o</kbd> Open context</span>
@@ -831,6 +834,11 @@ export default function CxdbApp() {
           onNavigateToContext={handleSelectContext}
         />
       )}
+
+      <TokenManagement
+        isOpen={tokenManagementOpen}
+        onClose={() => setTokenManagementOpen(false)}
+      />
     </div>
   );
 }

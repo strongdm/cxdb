@@ -1,0 +1,29 @@
+# CXDB
+
+CXDB is an AI context store. It stores immutable turns in a branchable DAG and deduplicates payloads in a BLAKE3 content-addressed blob store.
+
+## Interfaces
+
+- OpenAPI 3.1 JSON: /openapi.json
+- OpenAPI 3.1 YAML: /openapi.yaml
+- Remote MCP: /mcp
+- MCP protected-resource metadata: /.well-known/oauth-protected-resource/mcp
+- OAuth authorization-server metadata: /.well-known/oauth-authorization-server
+
+## Authentication
+
+Browser users sign in with the configured OIDC provider. The Web UI can create personal API tokens. Send a token as `Authorization: Bearer <token>`. Tokens have `cxdb:read` and optional `cxdb:write` scopes. Token plaintext is shown once. Do not put tokens in URLs or browser storage.
+
+Remote MCP clients use OAuth 2.1 authorization code flow with PKCE. CXDB delegates the browser login to OIDC. Dynamic client registration is available at `/oauth/register`.
+
+## Reading turns
+
+The UI and list APIs use summary-first loading for large traces. A `string_limit` can truncate MessagePack string values. To get complete data, call `/v1/contexts/{context_id}/turns?turn_id={turn_id}` without `string_limit`. Do not treat a bounded list response as the complete turn.
+
+Use `view=typed`, `view=raw`, or `view=both`. Typed projection accepts numeric MessagePack field tags and descriptor field names. Numeric tags take priority if both forms occur.
+
+Writers can send `payload_base64`, typed JSON in `data`, or typed JSON in `payload` to `/v1/contexts/{context_id}/append` or `/turns`. Typed JSON uses the matching registry descriptor and encodes numeric MessagePack tags.
+
+Context detail responses can include parent, root, and child lineage. Use `/v1/contexts/{context_id}/children` for direct or recursive child contexts. `/v1/errors` returns a bounded diagnostic list. Stored error paths exclude query strings.
+
+`/v1/events` is an SSE change feed. Direct Rust ports 9009 and 9010 are outside the gateway authentication boundary.

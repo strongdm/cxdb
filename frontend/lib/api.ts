@@ -1,7 +1,11 @@
-import type { TurnResponse, FetchTurnsOptions, ErrorResponse, ContextEntry, SessionInfo, Provenance } from '@/types';
+// Copyright 2025 StrongDM Inc
+// SPDX-License-Identifier: Apache-2.0
+
+import type { TurnResponse, FetchTurnsOptions, ErrorResponse, ContextEntry, SessionInfo, Provenance, APITokenMetadata, CurrentUser, Turn } from '@/types';
 import type { FsListResponse, FsFileResponse } from '@/types/filesystem';
 
 const API_BASE = '/v1';
+const AUTH_API_BASE = '/api/v1';
 
 export interface ContextsResponse {
   contexts: ContextEntry[];
@@ -19,6 +23,78 @@ export class ApiError extends Error {
     super(message);
     this.name = 'ApiError';
   }
+}
+
+async function authApiError(response: Response): Promise<ApiError> {
+  let message = `HTTP ${response.status}`;
+  let errorData: ErrorResponse | undefined;
+  try {
+    const body: unknown = await response.json();
+    if (typeof body === 'object' && body !== null) {
+      const value = body as { error?: unknown; message?: unknown };
+      if (typeof value.error === 'string') message = value.error;
+      else if (typeof value.message === 'string') message = value.message;
+      else if (typeof value.error === 'object' && value.error !== null) {
+        const detail = value.error as { message?: unknown; code?: unknown };
+        if (typeof detail.message === 'string') message = detail.message;
+        errorData = { error: { message, code: typeof detail.code === 'number' ? detail.code : response.status } };
+      }
+      if (!errorData) errorData = { error: { message, code: response.status } };
+    }
+  } catch {
+    try {
+      const text = await response.text();
+      if (text.trim()) message = text.trim();
+    } catch {
+      // Keep the status message.
+    }
+  }
+  return new ApiError(message, response.status, errorData);
+}
+
+/** Fetch the browser identity and its session-bound CSRF token. */
+export async function fetchCurrentUser(): Promise<CurrentUser> {
+  const response = await fetch(`${AUTH_API_BASE}/me`, { credentials: 'same-origin' });
+  if (!response.ok) throw await authApiError(response);
+  return response.json() as Promise<CurrentUser>;
+}
+
+/** List token metadata. Token plaintext is never returned by this endpoint. */
+export async function fetchAPITokens(): Promise<APITokenMetadata[]> {
+  const response = await fetch(`${AUTH_API_BASE}/tokens`, { credentials: 'same-origin' });
+  if (!response.ok) throw await authApiError(response);
+  const payload = await response.json() as { tokens?: APITokenMetadata[] };
+  return Array.isArray(payload.tokens) ? payload.tokens : [];
+}
+
+export interface CreateAPITokenInput {
+  name: string;
+  scopes: string[];
+  expires_at?: string;
+}
+
+export interface CreateAPITokenResponse {
+  token: APITokenMetadata;
+  plaintext: string;
+}
+
+/** Create a token. The gateway returns its plaintext once. */
+export async function createAPIToken(csrfToken: string, input: CreateAPITokenInput): Promise<CreateAPITokenResponse> {
+  const response = await fetch(`${AUTH_API_BASE}/tokens`, {
+    method: 'POST', credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+    body: JSON.stringify(input),
+  });
+  if (!response.ok) throw await authApiError(response);
+  return response.json() as Promise<CreateAPITokenResponse>;
+}
+
+/** Revoke a token with the session-bound CSRF token. */
+export async function revokeAPIToken(csrfToken: string, tokenId: string): Promise<void> {
+  const response = await fetch(`${AUTH_API_BASE}/tokens/${encodeURIComponent(tokenId)}`, {
+    method: 'DELETE', credentials: 'same-origin', headers: { 'X-CSRF-Token': csrfToken },
+  });
+  if (!response.ok) throw await authApiError(response);
 }
 
 function normalizeContextEntry(context: ContextEntry): ContextEntry {
@@ -94,6 +170,8 @@ export async function fetchTurns(
   if (options.include_unknown !== undefined) {
     params.set('include_unknown', String(options.include_unknown));
   }
+  if (options.string_limit !== undefined) params.set('string_limit', String(options.string_limit));
+  if (options.turn_id !== undefined) params.set('turn_id', options.turn_id);
 
   const queryString = params.toString();
   const url = `${API_BASE}/contexts/${encodeURIComponent(contextId)}/turns${queryString ? `?${queryString}` : ''}`;
@@ -115,6 +193,14 @@ export async function fetchTurns(
   }
 
   return normalizeTurnResponse(await response.json());
+}
+
+/** Fetch one complete turn after a bounded list response. */
+export async function fetchTurn(contextId: string, turnId: string): Promise<Turn> {
+  const response = await fetchTurns(contextId, { turn_id: turnId, limit: 1, view: 'typed', include_unknown: true });
+  const turn = response.turns[0];
+  if (!turn) throw new ApiError('Turn not found', 404);
+  return turn;
 }
 
 /**

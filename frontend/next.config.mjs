@@ -9,6 +9,8 @@ export default function nextConfig(phase) {
   const isProductionBuild = phase === PHASE_PRODUCTION_BUILD;
   const usesProductionArtifacts =
     phase === PHASE_PRODUCTION_BUILD || phase === PHASE_PRODUCTION_SERVER;
+  const requestedDistDir = process.env.CXDB_NEXT_DIST_DIR?.trim();
+  const gatewayURL = (process.env.CXDB_GATEWAY_URL?.trim() || 'http://127.0.0.1:8080').replace(/\/+$/, '');
 
   return {
     // Static export in production builds, but keep the dev server dynamic so
@@ -17,7 +19,7 @@ export default function nextConfig(phase) {
     // Keep production builds from clobbering the live dev server's `.next`
     // artifacts. Running `next build` while `next dev` is active otherwise
     // leaves the dev server pointing at stale asset aliases that 404.
-    distDir: usesProductionArtifacts ? '.next-build' : '.next',
+    distDir: requestedDistDir || (usesProductionArtifacts ? '.next-build' : '.next'),
 
     // Disable image optimization for static export
     images: {
@@ -41,6 +43,10 @@ export default function nextConfig(phase) {
               {
                 source: '/c/:contextId',
                 destination: '/',
+              },
+              {
+                source: '/api/v1/:path*',
+                destination: `${gatewayURL}/api/v1/:path*`,
               },
               {
                 source: '/v1/:path*',

@@ -1,10 +1,13 @@
+// Copyright 2025 StrongDM Inc
+// SPDX-License-Identifier: Apache-2.0
+
 'use client';
 
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import type { Turn, TurnResponse, DebugEvent } from '@/types';
 import { Layers, Hash, X, Copy, Search, Loader2, AlertCircle, GitBranch, ChevronDown, ChevronRight, Terminal, MessageSquare, Wrench, CheckCircle, XCircle, Folder, Zap, Database } from './icons';
 import { cn, trunc, safeStringify, formatTime, contentPreview } from '@/lib/utils';
-import { fetchTurns, fetchFsDirectory, ApiError } from '@/lib/api';
+import { fetchTurn, fetchTurns, fetchFsDirectory, ApiError } from '@/lib/api';
 import { FileBrowser } from './FileBrowser';
 import { FileViewer } from './FileViewer';
 import { TryRenderCanonical, isConversationItem } from './ConversationRenderer';
@@ -16,6 +19,9 @@ import { DynamicRenderer } from './DynamicRenderer';
 import { useRendererManifest } from '@/lib/use-renderer';
 import { getItemTypeLabel, getItemTypeColors } from '@/types/conversation';
 import type { ConversationItem, ItemType } from '@/types/conversation';
+
+const TURN_PAGE_SIZE = 100;
+const TURN_LIST_STRING_LIMIT = 512;
 
 // View tabs for the right panel
 type DetailView = 'turn' | 'provenance';
@@ -149,6 +155,21 @@ function extractToolCalls(turn: Turn): Array<{ id: string; name: string; argumen
     }));
   }
 
+  // A legacy ToolCall is often stored as its own turn rather than inside an
+  // assistant message. Treat that one payload as a single call so its result
+  // can be matched by tool_call_id as well.
+  if (turn.declared_type?.type_id.includes('ToolCall')) {
+    const id = data.id ?? data.call_id ?? data['1'];
+    const name = data.name ?? data['2'];
+    if (id !== undefined && name !== undefined) {
+      return [{
+        id: String(id),
+        name: String(name),
+        arguments: String(data.arguments ?? data.args ?? data['3'] ?? '{}'),
+      }];
+    }
+  }
+
   // Legacy extraction
   const toolCalls = data.tool_calls as Array<Record<string, unknown>> | undefined;
   if (!Array.isArray(toolCalls)) return [];
@@ -159,6 +180,39 @@ function extractToolCalls(turn: Turn): Array<{ id: string; name: string; argumen
     name: String(tc.name ?? tc['2'] ?? 'unknown'),
     arguments: String(tc.arguments ?? tc.args ?? tc['3'] ?? '{}'),
   }));
+}
+
+/**
+ * A v2 assistant turn can carry its result in the same payload as the call.
+ * Such a result is already exact when this turn has been hydrated. Do not
+ * replace it with a lookup for a separate result turn.
+ */
+function hasEmbeddedToolResult(turn: Turn, toolCallId: string): boolean {
+  const data = turn.data as Record<string, unknown> | undefined;
+  if (!data) return false;
+
+  if (isConversationItem(data) && data.item_type === 'assistant_turn' && data.turn?.tool_calls) {
+    return data.turn.tool_calls.some(toolCall => {
+      if (toolCall.id !== toolCallId) return false;
+      return toolCall.result !== undefined
+        || toolCall.error !== undefined
+        || toolCall.streaming_output !== undefined;
+    });
+  }
+
+  // Keep compatibility with legacy payloads that use numeric msgpack keys.
+  const toolCalls = data.tool_calls as Array<Record<string, unknown>> | undefined;
+  if (!Array.isArray(toolCalls)) return false;
+
+  return toolCalls.some(toolCall => {
+    const id = String(toolCall.id ?? toolCall['1'] ?? '');
+    if (id !== toolCallId) return false;
+    return toolCall.result !== undefined
+      || toolCall.error !== undefined
+      || toolCall.streaming_output !== undefined
+      || toolCall['9'] !== undefined
+      || toolCall['10'] !== undefined;
+  });
 }
 
 // Extract tool result info - handles canonical types and legacy formats
@@ -414,6 +468,128 @@ function TurnContentView({ turn }: { turn: Turn }) {
   return <LegacyTurnContentView turn={turn} />;
 }
 
+type ToolResultHydration =
+  | { state: 'loading' }
+  | { state: 'ready'; turn: Turn }
+  | { state: 'error' };
+
+interface ToolResultMatchesProps {
+  contextId: string;
+  turn: Turn;
+  resultTurns: Map<string, Turn>;
+}
+
+/**
+ * Show results for calls which are represented by separate turns.
+ *
+ * The list endpoint is deliberately bounded for large traces. A result found
+ * in that list can therefore still contain a 512-character prefix. Hydrate
+ * each matched result by ID before rendering it. Missing means "not in the
+ * loaded page", not "the store has no such result".
+ */
+function ToolResultMatches({ contextId, turn, resultTurns }: ToolResultMatchesProps) {
+  const calls = useMemo(() => extractToolCalls(turn), [turn]);
+  const matches = useMemo(() => calls
+    .filter(call => !hasEmbeddedToolResult(turn, call.id))
+    .map(call => ({
+      call,
+      resultTurn: resultTurns.get(call.id) ?? null,
+      key: `${call.id}:${resultTurns.get(call.id)?.turn_id ?? 'missing'}`,
+    })), [calls, resultTurns, turn]);
+  const matchKey = matches.map(match => match.key).join('|');
+  const [hydration, setHydration] = useState<Record<string, ToolResultHydration>>({});
+
+  useEffect(() => {
+    let cancelled = false;
+    const initial: Record<string, ToolResultHydration> = {};
+    for (const match of matches) {
+      if (match.resultTurn) initial[match.key] = { state: 'loading' };
+    }
+    setHydration(initial);
+
+    const matchedResults = matches.filter((match): match is typeof match & { resultTurn: Turn } => (
+      match.resultTurn !== null
+    ));
+    if (matchedResults.length === 0) return () => { cancelled = true; };
+
+    for (const match of matchedResults) {
+      fetchTurn(contextId, match.resultTurn.turn_id)
+        .then(exactTurn => {
+          if (!cancelled) {
+            setHydration(previous => ({
+              ...previous,
+              [match.key]: { state: 'ready', turn: exactTurn },
+            }));
+          }
+        })
+        .catch(() => {
+          if (!cancelled) {
+            setHydration(previous => ({ ...previous, [match.key]: { state: 'error' } }));
+          }
+        });
+    }
+
+    return () => { cancelled = true; };
+  }, [contextId, matchKey, matches]);
+
+  if (matches.length === 0) return null;
+
+  return (
+    <CollapsibleSection
+      title="Tool Results"
+      defaultOpen
+      data-tool-result-matches
+      badge={<span className="text-[10px] text-theme-text-faint">{matches.length}</span>}
+    >
+      <div className="space-y-3">
+        {matches.map(match => {
+          const result = hydration[match.key];
+          return (
+            <div
+              key={match.key}
+              data-tool-result-match={match.call.id}
+              data-tool-result-state={
+                !match.resultTurn ? 'missing' : result?.state ?? 'loading'
+              }
+              className="border border-theme-border/50 rounded-lg p-3"
+            >
+              <div className="flex items-center gap-2 mb-2 text-xs">
+                <Terminal className="w-3.5 h-3.5 text-theme-success" />
+                <span className="text-theme-text-muted">{match.call.name}</span>
+                <span className="font-mono text-theme-text-faint">{match.call.id}</span>
+                {match.resultTurn && (
+                  <span className="ml-auto font-mono text-theme-text-faint">
+                    Turn #{match.resultTurn.turn_id}
+                  </span>
+                )}
+              </div>
+
+              {!match.resultTurn ? (
+                <div className="flex items-center gap-2 text-xs text-theme-text-dim">
+                  <AlertCircle className="w-3.5 h-3.5" />
+                  No separate result turn in the loaded page.
+                </div>
+              ) : result?.state === 'error' ? (
+                <div className="flex items-center gap-2 text-xs text-red-400">
+                  <AlertCircle className="w-3.5 h-3.5" />
+                  Failed to load the complete result turn.
+                </div>
+              ) : result?.state === 'ready' ? (
+                <TurnContentView turn={result.turn} />
+              ) : (
+                <div className="flex items-center gap-2 text-xs text-theme-text-dim">
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  Loading the complete result…
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </CollapsibleSection>
+  );
+}
+
 // Format arguments JSON for display
 function formatArguments(args: string): string {
   try {
@@ -437,11 +613,10 @@ interface ContextDebuggerProps {
   onNavigateToContext?: (contextId: string) => void;
 }
 
-const TURNS_PAGE_SIZE = 100;
-
 export function ContextDebugger({ contextId, isOpen, onClose, lastEvent, initialTurnId, onTurnChange, onNavigateToContext }: ContextDebuggerProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const turnListRef = useRef<HTMLDivElement | null>(null);
+  const lastResetContextIdRef = useRef<string | null>(null);
   const [query, setQuery] = useState('');
   const [selectedIdx, setSelectedIdx] = useState(0);
   const [copied, setCopied] = useState<'context' | 'event' | null>(null);
@@ -449,9 +624,15 @@ export function ContextDebugger({ contextId, isOpen, onClose, lastEvent, initial
 
   // Data fetching state
   const [loading, setLoading] = useState(false);
-  const [loadingMore, setLoadingMore] = useState(false);
+  const [loadingOlder, setLoadingOlder] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [data, setData] = useState<TurnResponse | null>(null);
+  const [hasMoreTurns, setHasMoreTurns] = useState(false);
+  const [selectedTurnDetail, setSelectedTurnDetail] = useState<Turn | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detailError, setDetailError] = useState<string | null>(null);
+  const [searchHydrating, setSearchHydrating] = useState(false);
+  const [searchHydrationError, setSearchHydrationError] = useState<string | null>(null);
 
   // Live observer state
   const [newTurnIds, setNewTurnIds] = useState<Set<string>>(new Set());
@@ -477,11 +658,13 @@ export function ContextDebugger({ contextId, isOpen, onClose, lastEvent, initial
 
     try {
       const response = await fetchTurns(contextId, {
-        limit: TURNS_PAGE_SIZE,
+        limit: TURN_PAGE_SIZE,
         view: 'typed',
         include_unknown: true,
+        string_limit: TURN_LIST_STRING_LIMIT,
       });
       setData(response);
+      setHasMoreTurns(response.turns.length === TURN_PAGE_SIZE);
     } catch (err) {
       if (err instanceof ApiError) {
         setError(err.message);
@@ -494,31 +677,48 @@ export function ContextDebugger({ contextId, isOpen, onClose, lastEvent, initial
     }
   }, [contextId]);
 
-  // Load older turns using pagination cursor
-  const loadMore = useCallback(async () => {
-    if (!contextId || !data?.next_before_turn_id) return;
+  const loadOlderTurns = useCallback(async () => {
+    if (!contextId || !data?.next_before_turn_id || loadingOlder) return;
 
-    setLoadingMore(true);
+    setLoadingOlder(true);
+    setError(null);
+
     try {
       const response = await fetchTurns(contextId, {
-        limit: TURNS_PAGE_SIZE,
+        limit: TURN_PAGE_SIZE,
         before_turn_id: data.next_before_turn_id,
         view: 'typed',
         include_unknown: true,
+        string_limit: TURN_LIST_STRING_LIMIT,
       });
-      const prepended = response.turns.length;
-      setData(prev => prev ? {
-        ...prev,
-        turns: [...response.turns, ...prev.turns],
-        next_before_turn_id: response.next_before_turn_id,
-      } : response);
-      setSelectedIdx(prev => prev + prepended);
-    } catch {
-      // Keep existing data on failure
+      setData(prev => {
+        if (!prev) return response;
+        const seen = new Set(prev.turns.map(turn => turn.turn_id));
+        const olderTurns = response.turns.filter(turn => !seen.has(turn.turn_id));
+        if (olderTurns.length === 0) {
+          return {
+            ...prev,
+            next_before_turn_id: response.next_before_turn_id,
+          };
+        }
+        setSelectedIdx(idx => idx + olderTurns.length);
+        return {
+          ...prev,
+          turns: [...olderTurns, ...prev.turns],
+          next_before_turn_id: response.next_before_turn_id,
+        };
+      });
+      setHasMoreTurns(response.turns.length === TURN_PAGE_SIZE);
+    } catch (err) {
+      if (err instanceof ApiError) {
+        setError(err.message);
+      } else {
+        setError('Failed to fetch older turns');
+      }
     } finally {
-      setLoadingMore(false);
+      setLoadingOlder(false);
     }
-  }, [contextId, data?.next_before_turn_id]);
+  }, [contextId, data?.next_before_turn_id, loadingOlder]);
 
   useEffect(() => {
     if (isOpen && contextId) {
@@ -568,10 +768,14 @@ export function ContextDebugger({ contextId, isOpen, onClose, lastEvent, initial
   }, []);
 
   // Filter turns by search query
+  const hasSearchQuery = query.trim().length > 0;
+  const isSummaryPage = typeof data?.meta.string_limit === 'number';
   const filteredTurns = useMemo(() => {
     if (!data?.turns) return [];
     const q = query.trim().toLowerCase();
     if (!q) return data.turns;
+    // Never present prefix-only filtering as a complete search result.
+    if (typeof data.meta.string_limit === 'number') return [];
 
     return data.turns.filter(turn => {
       const content = extractContent(turn)?.toLowerCase() ?? '';
@@ -583,7 +787,102 @@ export function ContextDebugger({ contextId, isOpen, onClose, lastEvent, initial
   }, [data, query]);
 
   // Selected turn
-  const selectedTurn = filteredTurns[selectedIdx] ?? null;
+  const selectedListTurn = filteredTurns[selectedIdx] ?? null;
+  const selectedTurn = selectedTurnDetail?.turn_id === selectedListTurn?.turn_id
+    ? selectedTurnDetail
+    : selectedListTurn;
+  const selectedTurnIsExact = !isSummaryPage
+    || selectedTurnDetail?.turn_id === selectedListTurn?.turn_id;
+
+  // Build a bounded index from the turns already loaded. Matching must not
+  // fetch the complete context history, especially for large traces.
+  const separateToolResultTurns = useMemo(() => {
+    const resultTurns = new Map<string, Turn>();
+    for (const turn of data?.turns ?? []) {
+      const result = extractToolResult(turn);
+      if (result && result.toolCallId !== 'unknown') {
+        resultTurns.set(result.toolCallId, turn);
+      }
+    }
+    return resultTurns;
+  }, [data]);
+
+  // List pages carry bounded string prefixes. Fetch only the selected turn's
+  // complete payload for the detail renderer.
+  useEffect(() => {
+    const turnId = selectedListTurn?.turn_id;
+    if (!turnId || typeof data?.meta.string_limit !== 'number') {
+      setSelectedTurnDetail(null);
+      setDetailLoading(false);
+      setDetailError(null);
+      return;
+    }
+
+    let cancelled = false;
+    let requestStarted = false;
+    setSelectedTurnDetail(null);
+    setDetailLoading(true);
+    setDetailError(null);
+    // Selection can move from the first rendered row to the followed tail in
+    // the same render cycle. Debouncing avoids transferring the discarded
+    // detail and also coalesces rapid keyboard navigation.
+    const timer = window.setTimeout(() => {
+      requestStarted = true;
+      fetchTurn(contextId, turnId)
+        .then(turn => {
+          if (!cancelled) setSelectedTurnDetail(turn);
+        })
+        .catch(() => {
+          if (!cancelled) setDetailError('Failed to load the complete turn.');
+        })
+        .finally(() => {
+          if (!cancelled) setDetailLoading(false);
+        });
+    }, 25);
+    return () => {
+      cancelled = true;
+      if (!requestStarted) window.clearTimeout(timer);
+    };
+  }, [contextId, data?.meta.string_limit, selectedListTurn?.turn_id]);
+
+  // Preserve full-text filtering semantics: the common browsing path uses
+  // summaries, while entering a query hydrates every currently loaded turn.
+  useEffect(() => {
+    if (
+      !hasSearchQuery
+      || !data
+      || typeof data.meta.string_limit !== 'number'
+    ) {
+      if (!hasSearchQuery) {
+        setSearchHydrating(false);
+        setSearchHydrationError(null);
+      }
+      return;
+    }
+    let cancelled = false;
+    setSearchHydrating(true);
+    setSearchHydrationError(null);
+    fetchTurns(contextId, {
+      limit: data.turns.length,
+      view: 'typed',
+      include_unknown: true,
+    })
+      .then(response => {
+        if (!cancelled) {
+          setData(response);
+          setSelectedTurnDetail(null);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setSearchHydrationError('Failed to load complete turns for search.');
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setSearchHydrating(false);
+      });
+    return () => { cancelled = true; };
+  }, [contextId, data, hasSearchQuery]);
 
   // Detect filesystem for selected turn
   const selectedTurnId = selectedTurn?.turn_id;
@@ -628,12 +927,42 @@ export function ContextDebugger({ contextId, isOpen, onClose, lastEvent, initial
     if (!data?.turns || initialTurnApplied) return;
 
     if (initialTurnId) {
-      // Find and select the specified turn
       const idx = filteredTurns.findIndex(t => t.turn_id === initialTurnId);
       if (idx >= 0) {
         setSelectedIdx(idx);
         setInitialTurnApplied(true);
+        return;
       }
+
+      // A deep link can target a turn outside the bounded first page. Hydrate
+      // that exact turn and add it to the list so the URL and visible selection
+      // cannot disagree.
+      let cancelled = false;
+      setDetailLoading(true);
+      setDetailError(null);
+      fetchTurn(contextId, initialTurnId)
+        .then(turn => {
+          if (cancelled) return;
+          setData(previous => {
+            if (!previous || previous.turns.some(item => item.turn_id === turn.turn_id)) {
+              return previous;
+            }
+            return { ...previous, turns: [turn, ...previous.turns] };
+          });
+          setSelectedIdx(0);
+          setSelectedTurnDetail(turn);
+          setInitialTurnApplied(true);
+        })
+        .catch(() => {
+          if (!cancelled) {
+            setDetailError('Failed to load the linked turn.');
+            setInitialTurnApplied(true);
+          }
+        })
+        .finally(() => {
+          if (!cancelled) setDetailLoading(false);
+        });
+      return () => { cancelled = true; };
     } else if (filteredTurns.length > 0) {
       // No initial turn specified, notify parent of first turn
       const firstTurn = filteredTurns[0];
@@ -642,11 +971,11 @@ export function ContextDebugger({ contextId, isOpen, onClose, lastEvent, initial
       }
       setInitialTurnApplied(true);
     }
-  }, [data, initialTurnId, initialTurnApplied, filteredTurns, onTurnChange]);
+  }, [contextId, data, initialTurnId, initialTurnApplied, filteredTurns, onTurnChange]);
 
   // Count stats - count both tool_call turns AND tool_calls embedded in assistant turns
   const stats = useMemo(() => {
-    if (!data?.turns) return { total: 0, loaded: 0, toolCalls: 0, errors: 0 };
+    if (!data?.turns) return { loaded: 0, total: 0, toolCalls: 0, errors: 0 };
     let toolCalls = 0;
     let errors = 0;
     for (const turn of data.turns) {
@@ -661,9 +990,12 @@ export function ContextDebugger({ contextId, isOpen, onClose, lastEvent, initial
       const result = extractToolResult(turn);
       if (result?.isError) errors++;
     }
-    const headId = data.meta?.head_turn_id;
-    const total = headId && headId !== '0' ? (data.meta?.head_depth ?? 0) + 1 : 0;
-    return { total, loaded: data.turns.length, toolCalls, errors };
+    return {
+      loaded: data.turns.length,
+      total: data.meta.head_turn_id === '0' ? 0 : data.meta.head_depth + 1,
+      toolCalls,
+      errors,
+    };
   }, [data]);
 
   // Auto-select last turn when following and new turns arrive
@@ -696,16 +1028,32 @@ export function ContextDebugger({ contextId, isOpen, onClose, lastEvent, initial
 
   // Reset state when modal opens/closes
   useEffect(() => {
-    if (!isOpen) return;
+    if (!isOpen) {
+      lastResetContextIdRef.current = null;
+      return;
+    }
+
+    // Don't reset state on URL turn-id changes while open; only reset on open/context changes.
+    if (lastResetContextIdRef.current === contextId) {
+      return;
+    }
+    lastResetContextIdRef.current = contextId;
+
     setQuery('');
     // Only reset to 0 if no initialTurnId; otherwise let the initialTurn effect handle it
     if (!initialTurnId) {
       setSelectedIdx(0);
     }
-    setInitialTurnApplied(false);
     setCopied(null);
     requestAnimationFrame(() => containerRef.current?.focus());
   }, [isOpen, contextId, initialTurnId]);
+
+  // Allow URL-driven turn selection changes (e.g. browser back/forward) to re-apply without
+  // wiping the user's current filter query.
+  useEffect(() => {
+    if (!isOpen) return;
+    setInitialTurnApplied(false);
+  }, [isOpen, initialTurnId]);
 
   // Clear copied state after delay
   useEffect(() => {
@@ -718,9 +1066,30 @@ export function ContextDebugger({ contextId, isOpen, onClose, lastEvent, initial
 
   const handleCopy = async (kind: 'context' | 'event') => {
     try {
-      const text = kind === 'context'
-        ? safeStringify(data ?? { error: 'No data' })
-        : safeStringify(selectedTurn ?? {});
+      let value: unknown;
+      if (kind === 'context' && data && typeof data.meta.string_limit === 'number') {
+        const complete = await fetchTurns(contextId, {
+          limit: data.turns.length,
+          view: 'typed',
+          include_unknown: true,
+        });
+        setData(complete);
+        value = complete;
+      } else if (
+        kind === 'event'
+        && selectedListTurn
+        && typeof data?.meta.string_limit === 'number'
+        && selectedTurn?.turn_id !== selectedTurnDetail?.turn_id
+      ) {
+        const complete = await fetchTurn(contextId, selectedListTurn.turn_id);
+        setSelectedTurnDetail(complete);
+        value = complete;
+      } else {
+        value = kind === 'context'
+          ? data ?? { error: 'No data' }
+          : selectedTurn ?? {};
+      }
+      const text = safeStringify(value);
       await navigator.clipboard.writeText(text);
       setCopied(kind);
     } catch {
@@ -778,51 +1147,56 @@ export function ContextDebugger({ contextId, isOpen, onClose, lastEvent, initial
         ref={containerRef}
         tabIndex={-1}
         onKeyDown={handleKeyDown}
-        className="h-full w-full outline-none"
+        className="flex h-[100dvh] w-full flex-col outline-none"
         data-context-debugger
       >
         {/* Header - more compact */}
-        <div className="h-12 px-4 border-b border-theme-border bg-theme-bg-secondary flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="flex items-center gap-2">
-              <Layers className="w-5 h-5 text-theme-accent" />
-              <span className="text-sm font-semibold text-theme-text">Context {contextId}</span>
+        <div className="flex min-h-12 shrink-0 items-center justify-between gap-2 border-b border-theme-border bg-theme-bg-secondary px-2 py-2 sm:px-4">
+          <div className="flex min-w-0 items-center gap-3">
+            <div className="flex min-w-0 items-center gap-2">
+              <Layers className="h-5 w-5 shrink-0 text-theme-accent" />
+              <span className="truncate text-sm font-semibold text-theme-text">Context {contextId}</span>
             </div>
             {data && (
-              <div className="flex items-center gap-3 text-xs text-theme-text-dim">
-                <span>{stats.loaded < stats.total ? `${stats.loaded} of ${stats.total} turns` : `${stats.total} turns`}</span>
-                <span>{stats.toolCalls} tool calls</span>
+              <div className="hidden items-center gap-3 text-xs text-theme-text-dim sm:flex">
+                <span>{stats.loaded} of {stats.total} turns loaded</span>
+                <span className="hidden lg:inline">{stats.toolCalls} tool calls</span>
                 {stats.errors > 0 && (
-                  <span className="text-red-400">{stats.errors} errors</span>
+                  <span className="hidden text-red-400 lg:inline">{stats.errors} errors</span>
                 )}
               </div>
             )}
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex shrink-0 items-center gap-1 sm:gap-2">
             <button
               onClick={() => handleCopy('context')}
               disabled={loading || !data}
+              data-copy-all
+              aria-label="Copy all context data"
               className={cn(
-                'px-2.5 py-1 text-xs rounded border transition-colors inline-flex items-center gap-1',
+                'inline-flex min-h-9 items-center gap-1 rounded border px-2 text-xs transition-colors sm:min-h-0 sm:px-2.5 sm:py-1',
                 copied === 'context'
                   ? 'bg-emerald-600/20 border-emerald-500/30 text-emerald-300'
                   : 'bg-theme-bg-tertiary border-theme-border text-theme-text-secondary hover:bg-theme-bg-hover disabled:opacity-50'
               )}
             >
               <Copy className="w-3 h-3" />
-              {copied === 'context' ? 'Copied!' : 'Copy all'}
+              <span className="hidden sm:inline">{copied === 'context' ? 'Copied!' : 'Copy all'}</span>
             </button>
             <button
               onClick={loadTurns}
               disabled={loading}
-              className="px-2.5 py-1 text-xs rounded border bg-theme-bg-tertiary border-theme-border text-theme-text-secondary hover:bg-theme-bg-hover disabled:opacity-50"
+              aria-label="Refresh turns"
+              className="min-h-9 rounded border border-theme-border bg-theme-bg-tertiary px-2 text-xs text-theme-text-secondary hover:bg-theme-bg-hover disabled:opacity-50 sm:min-h-0 sm:px-2.5 sm:py-1"
             >
-              {loading ? 'Loading...' : 'Refresh'}
+              <span className="sm:hidden">↻</span>
+              <span className="hidden sm:inline">{loading ? 'Loading...' : 'Refresh'}</span>
             </button>
             <button
               onClick={onClose}
-              className="p-1.5 text-theme-text-muted hover:text-theme-text-secondary hover:bg-theme-bg-tertiary rounded transition-colors"
+              aria-label="Close context debugger"
+              className="rounded p-2 text-theme-text-muted transition-colors hover:bg-theme-bg-tertiary hover:text-theme-text-secondary sm:p-1.5"
             >
               <X className="w-5 h-5" />
             </button>
@@ -830,9 +1204,9 @@ export function ContextDebugger({ contextId, isOpen, onClose, lastEvent, initial
         </div>
 
         {/* Body */}
-        <div className="h-[calc(100%-3rem)] flex">
+        <div className="flex min-h-0 flex-1 flex-col md:flex-row">
           {/* Left: Turn list - more compact */}
-          <div className="w-80 border-r border-theme-border bg-theme-bg-secondary/40 flex flex-col">
+          <div className="flex h-[38%] min-h-[12rem] w-full shrink-0 flex-col border-b border-theme-border bg-theme-bg-secondary/40 md:h-auto md:min-h-0 md:w-80 md:border-b-0 md:border-r">
             <div className="p-2 border-b border-theme-border">
               <div className="relative">
                 <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-theme-text-dim" />
@@ -852,6 +1226,24 @@ export function ContextDebugger({ contextId, isOpen, onClose, lastEvent, initial
               className={cn('overflow-y-auto relative', hasFilesystem ? 'flex-1 min-h-0' : 'flex-1')}
               data-debug-event-list
             >
+              {!loading && !error && data && hasMoreTurns && !query.trim() && (
+                <div className="p-2 border-b border-theme-border-dim/60 bg-theme-bg-secondary/50">
+                  <button
+                    onClick={loadOlderTurns}
+                    disabled={loadingOlder}
+                    className="w-full px-3 py-1.5 rounded border border-theme-border bg-theme-bg-tertiary text-xs text-theme-text-secondary hover:bg-theme-bg-hover disabled:opacity-50 inline-flex items-center justify-center gap-2"
+                  >
+                    {loadingOlder ? (
+                      <>
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        Loading older turns...
+                      </>
+                    ) : (
+                      'Load older turns'
+                    )}
+                  </button>
+                </div>
+              )}
               {loading ? (
                 <div className="p-6 flex flex-col items-center justify-center text-theme-text-dim">
                   <Loader2 className="w-6 h-6 animate-spin mb-2" />
@@ -862,22 +1254,22 @@ export function ContextDebugger({ contextId, isOpen, onClose, lastEvent, initial
                   <AlertCircle className="w-6 h-6 mb-2" />
                   <span className="text-xs">{error}</span>
                 </div>
+              ) : searchHydrating ? (
+                <div className="p-6 flex flex-col items-center justify-center text-theme-text-dim">
+                  <Loader2 className="w-6 h-6 animate-spin mb-2" />
+                  <span className="text-xs">Loading complete turns for search…</span>
+                </div>
+              ) : searchHydrationError ? (
+                <div className="p-6 flex flex-col items-center justify-center text-red-400">
+                  <AlertCircle className="w-6 h-6 mb-2" />
+                  <span className="text-xs">{searchHydrationError}</span>
+                </div>
               ) : filteredTurns.length === 0 ? (
                 <div className="p-6 text-xs text-theme-text-dim text-center">
                   {data?.turns.length === 0 ? 'No turns.' : 'No matches.'}
                 </div>
               ) : (
-                <>
-                {data && data.turns.length > 0 && data.turns[0].depth > 0 && (
-                  <button
-                    onClick={loadMore}
-                    disabled={loadingMore}
-                    className="w-full px-3 py-2 text-xs text-theme-accent hover:bg-theme-bg-tertiary/40 border-b border-theme-border-dim/60 transition-colors disabled:opacity-50"
-                  >
-                    {loadingMore ? 'Loading...' : `Load older turns (${data.turns[0].depth} remaining)`}
-                  </button>
-                )}
-                {filteredTurns.map((turn, idx) => {
+                filteredTurns.map((turn, idx) => {
                   const kind = detectTurnKind(turn);
                   const colors = getKindColors(kind);
                   const isSelected = idx === selectedIdx;
@@ -921,8 +1313,7 @@ export function ContextDebugger({ contextId, isOpen, onClose, lastEvent, initial
                       </div>
                     </button>
                   );
-                })}
-                </>
+                })
               )}
 
               {/* Resume following indicator */}
@@ -957,7 +1348,7 @@ export function ContextDebugger({ contextId, isOpen, onClose, lastEvent, initial
           </div>
 
           {/* Right: Detail view */}
-          <div className="flex-1 bg-theme-bg flex flex-col overflow-hidden relative">
+          <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden bg-theme-bg">
             {/* File viewer overlay */}
             {selectedFilePath && selectedTurn && (
               <FileViewer
@@ -974,11 +1365,11 @@ export function ContextDebugger({ contextId, isOpen, onClose, lastEvent, initial
             ) : (
               <>
                 {/* Detail view tabs */}
-                <div className="flex border-b border-theme-border-dim bg-theme-bg-secondary/50">
+                <div className="flex shrink-0 overflow-x-auto border-b border-theme-border-dim bg-theme-bg-secondary/50">
                   <button
                     onClick={() => setDetailView('turn')}
                     className={cn(
-                      'px-4 py-2 text-xs uppercase tracking-wide transition-colors',
+                      'shrink-0 px-3 py-2 text-xs uppercase tracking-wide transition-colors sm:px-4',
                       detailView === 'turn'
                         ? 'text-theme-accent border-b-2 border-theme-accent bg-theme-accent-muted'
                         : 'text-theme-text-dim hover:text-theme-text-muted'
@@ -989,7 +1380,7 @@ export function ContextDebugger({ contextId, isOpen, onClose, lastEvent, initial
                   <button
                     onClick={() => setDetailView('provenance')}
                     className={cn(
-                      'px-4 py-2 text-xs uppercase tracking-wide transition-colors',
+                      'shrink-0 px-3 py-2 text-xs uppercase tracking-wide transition-colors sm:px-4',
                       detailView === 'provenance'
                         ? 'text-theme-accent border-b-2 border-theme-accent bg-theme-accent-muted'
                         : 'text-theme-text-dim hover:text-theme-text-muted'
@@ -1001,29 +1392,31 @@ export function ContextDebugger({ contextId, isOpen, onClose, lastEvent, initial
                   {detailView === 'turn' && (
                     <button
                       onClick={() => handleCopy('event')}
+                      data-copy-event
+                      aria-label="Copy selected turn"
                       className={cn(
-                        'mr-2 my-1 px-2 py-1 text-xs rounded border transition-colors inline-flex items-center gap-1',
+                        'mr-1 my-1 shrink-0 px-2 py-1 text-xs rounded border transition-colors inline-flex items-center gap-1 sm:mr-2',
                         copied === 'event'
                           ? 'bg-emerald-600/20 border-emerald-500/30 text-emerald-300'
                           : 'bg-theme-bg-tertiary border-theme-border text-theme-text-muted hover:text-theme-text-secondary'
                       )}
                     >
                       <Copy className="w-3 h-3" />
-                      {copied === 'event' ? 'Copied' : 'Copy'}
+                      <span className="hidden sm:inline">{copied === 'event' ? 'Copied' : 'Copy'}</span>
                     </button>
                   )}
                 </div>
 
                 {/* Turn header (when viewing turn) */}
                 {detailView === 'turn' && (
-                  <div className="px-4 py-2 border-b border-theme-border-dim/50 bg-theme-bg-secondary/30 flex items-center gap-3">
+                  <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-theme-border-dim/50 bg-theme-bg-secondary/30 px-3 py-2 sm:gap-3 sm:px-4">
                     <div className={cn(
                       'px-2 py-0.5 rounded text-xs font-medium',
                       getKindColors(detectTurnKind(selectedTurn)).badge
                     )}>
                       {getKindLabel(detectTurnKind(selectedTurn))}
                     </div>
-                    <span className="text-xs text-theme-text-dim font-mono">
+                    <span className="break-all font-mono text-xs text-theme-text-dim">
                       Turn #{selectedTurn.turn_id} • Depth {selectedTurn.depth}
                     </span>
                   </div>
@@ -1031,48 +1424,72 @@ export function ContextDebugger({ contextId, isOpen, onClose, lastEvent, initial
 
                 {/* Content area - Turn view */}
                 {detailView === 'turn' && (
-                  <div className="flex-1 overflow-y-auto p-4 space-y-3">
-                    {/* Primary content view - uses dynamic renderer registry */}
-                    <DynamicRenderer
-                      data={selectedTurn.data}
-                      typeId={selectedTurn.declared_type?.type_id ?? ''}
-                      typeVersion={selectedTurn.declared_type?.type_version ?? 1}
-                      manifest={manifest}
-                    />
-
-                    {/* Collapsible metadata */}
-                    <CollapsibleSection
-                      title="Turn Metadata"
-                      badge={
-                        <span className="text-[10px] text-theme-text-faint font-mono">
-                          {selectedTurn.declared_type?.type_id?.split('.').pop()}
-                        </span>
-                      }
-                    >
-                      <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
-                        <div className="text-theme-text-dim">Turn ID</div>
-                        <div className="text-theme-text-secondary font-mono">{selectedTurn.turn_id}</div>
-                        <div className="text-theme-text-dim">Parent</div>
-                        <div className="text-theme-text-secondary font-mono">{selectedTurn.parent_turn_id || '(root)'}</div>
-                        <div className="text-theme-text-dim">Depth</div>
-                        <div className="text-theme-text-secondary">{selectedTurn.depth}</div>
-                        {selectedTurn.declared_type && (
-                          <>
-                            <div className="text-theme-text-dim">Type</div>
-                            <div className="text-theme-text-secondary font-mono text-[11px]">
-                              {selectedTurn.declared_type.type_id}@{selectedTurn.declared_type.type_version}
-                            </div>
-                          </>
+                  <div className="flex-1 space-y-3 overflow-y-auto p-3 sm:p-4">
+                    {!selectedTurnIsExact ? (
+                      <div className={cn(
+                        'flex items-center gap-2 text-sm',
+                        detailError ? 'text-red-400' : 'text-theme-text-dim'
+                      )}>
+                        {detailError ? (
+                          <AlertCircle className="w-4 h-4" />
+                        ) : (
+                          <Loader2 className="w-4 h-4 animate-spin" />
                         )}
+                        {detailError ?? (detailLoading
+                          ? 'Loading full turn…'
+                          : 'Waiting for full turn…')}
                       </div>
-                    </CollapsibleSection>
+                    ) : (
+                      <>
+                        {/* Primary content view - uses dynamic renderer registry */}
+                        <DynamicRenderer
+                          data={selectedTurn.data}
+                          typeId={selectedTurn.declared_type?.type_id ?? ''}
+                          typeVersion={selectedTurn.declared_type?.type_version ?? 1}
+                          manifest={manifest}
+                        />
 
-                    {/* Collapsible raw payload */}
-                    <CollapsibleSection title="Raw Payload" data-raw-payload-section>
-                      <pre data-raw-payload className="text-[11px] text-theme-text-muted whitespace-pre-wrap break-words font-mono leading-relaxed max-h-[300px] overflow-y-auto">
-                        {safeStringify(selectedTurn.data)}
-                      </pre>
-                    </CollapsibleSection>
+                        <ToolResultMatches
+                          contextId={contextId}
+                          turn={selectedTurn}
+                          resultTurns={separateToolResultTurns}
+                        />
+
+                        {/* Collapsible metadata */}
+                        <CollapsibleSection
+                          title="Turn Metadata"
+                          badge={
+                            <span className="text-[10px] text-theme-text-faint font-mono">
+                              {selectedTurn.declared_type?.type_id?.split('.').pop()}
+                            </span>
+                          }
+                        >
+                          <div className="grid grid-cols-[auto,minmax(0,1fr)] gap-x-3 gap-y-1 text-xs sm:gap-x-4">
+                            <div className="text-theme-text-dim">Turn ID</div>
+                            <div className="text-theme-text-secondary font-mono">{selectedTurn.turn_id}</div>
+                            <div className="text-theme-text-dim">Parent</div>
+                            <div className="text-theme-text-secondary font-mono">{selectedTurn.parent_turn_id || '(root)'}</div>
+                            <div className="text-theme-text-dim">Depth</div>
+                            <div className="text-theme-text-secondary">{selectedTurn.depth}</div>
+                            {selectedTurn.declared_type && (
+                              <>
+                                <div className="text-theme-text-dim">Type</div>
+                                <div className="break-all font-mono text-[11px] text-theme-text-secondary">
+                                  {selectedTurn.declared_type.type_id}@{selectedTurn.declared_type.type_version}
+                                </div>
+                              </>
+                            )}
+                          </div>
+                        </CollapsibleSection>
+
+                        {/* Collapsible raw payload */}
+                        <CollapsibleSection title="Raw Payload" data-raw-payload-section>
+                          <pre data-raw-payload className="text-[11px] text-theme-text-muted whitespace-pre-wrap break-words font-mono leading-relaxed max-h-[300px] overflow-y-auto">
+                            {safeStringify(selectedTurn.data)}
+                          </pre>
+                        </CollapsibleSection>
+                      </>
+                    )}
                   </div>
                 )}
 
@@ -1093,7 +1510,7 @@ export function ContextDebugger({ contextId, isOpen, onClose, lastEvent, initial
                 )}
 
                 {/* Footer */}
-                <div className="px-4 py-1.5 border-t border-theme-border-dim bg-theme-bg-secondary/50 text-[11px] text-theme-text-faint flex items-center gap-4">
+                <div className="hidden items-center gap-4 border-t border-theme-border-dim bg-theme-bg-secondary/50 px-4 py-1.5 text-[11px] text-theme-text-faint sm:flex">
                   <span><kbd className="px-1 py-0.5 bg-theme-bg-tertiary rounded">j</kbd>/<kbd className="px-1 py-0.5 bg-theme-bg-tertiary rounded">k</kbd> Navigate</span>
                   <span><kbd className="px-1 py-0.5 bg-theme-bg-tertiary rounded">F</kbd> Follow</span>
                   <span><kbd className="px-1 py-0.5 bg-theme-bg-tertiary rounded">⌘K</kbd> Search</span>

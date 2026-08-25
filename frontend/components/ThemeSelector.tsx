@@ -1,3 +1,6 @@
+// Copyright 2025 StrongDM Inc
+// SPDX-License-Identifier: Apache-2.0
+
 'use client';
 
 import { useState, useRef, useEffect } from 'react';
@@ -73,6 +76,7 @@ export function ThemeSelector({ className }: ThemeSelectorProps) {
         )}
         aria-expanded={isOpen}
         aria-haspopup="listbox"
+        aria-label={`Theme: ${theme.name}`}
       >
         <Palette className="w-3 h-3" />
         <ThemeSwatch theme={theme} />
@@ -88,7 +92,7 @@ export function ThemeSelector({ className }: ThemeSelectorProps) {
       {isOpen && (
         <div
           className={cn(
-            'absolute top-full right-0 mt-1 z-50',
+            'absolute left-0 top-full z-50 mt-1 sm:left-auto sm:right-0',
             'bg-theme-bg-secondary border border-theme-border rounded-lg shadow-xl',
             'py-1 min-w-[180px]',
             'animate-fade-in'

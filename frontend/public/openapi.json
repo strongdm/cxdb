@@ -1,0 +1,906 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "CXDB Gateway API",
+    "version": "0.3.0",
+    "description": "Authenticated HTTP access to the CXDB Turn DAG and Blob CAS. Exact turn hydration is required for complete large-trace data."
+  },
+  "servers": [
+    {
+      "url": "/"
+    }
+  ],
+  "security": [
+    {
+      "browserSession": [
+
+      ]
+    },
+    {
+      "bearerToken": [
+
+      ]
+    }
+  ],
+  "paths": {
+    "/healthz": {
+      "get": {
+        "security": [
+
+        ],
+        "operationId": "health",
+        "responses": {
+          "200": {
+            "description": "Healthy"
+          }
+        }
+      }
+    },
+    "/api/v1/me": {
+      "get": {
+        "security": [
+          {
+            "browserSession": []
+          }
+        ],
+        "operationId": "currentUser",
+        "responses": {
+          "200": {
+            "description": "Current identity and CSRF token"
+          }
+        }
+      }
+    },
+    "/api/v1/tokens": {
+      "get": {
+        "security": [
+          {
+            "browserSession": []
+          }
+        ],
+        "operationId": "listPersonalTokens",
+        "responses": {
+          "200": {
+            "description": "Personal token metadata; never plaintext or hashes"
+          }
+        }
+      },
+      "post": {
+        "security": [
+          {
+            "browserSession": []
+          }
+        ],
+        "operationId": "createPersonalToken",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/CSRFToken"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateToken"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Token metadata and one-time plaintext"
+          }
+        }
+      }
+    },
+    "/api/v1/tokens/{token_id}": {
+      "delete": {
+        "security": [
+          {
+            "browserSession": []
+          }
+        ],
+        "operationId": "revokePersonalToken",
+        "parameters": [
+          {
+            "name": "token_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/CSRFToken"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Revoked"
+          }
+        }
+      }
+    },
+    "/v1/contexts": {
+      "get": {
+        "operationId": "listContexts",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          {
+            "name": "include_provenance",
+            "in": "query",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "include_lineage",
+            "in": "query",
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Context list"
+          }
+        }
+      },
+      "post": {
+        "operationId": "createContext",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateContext"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created context head"
+          }
+        }
+      }
+    },
+    "/v1/contexts/fork": {
+      "post": {
+        "operationId": "forkContext",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateContext"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Forked context head"
+          }
+        }
+      }
+    },
+    "/v1/contexts/search": {
+      "get": {
+        "operationId": "searchContexts",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "CQL search results"
+          }
+        }
+      }
+    },
+    "/v1/contexts/create": {
+      "post": {
+        "operationId": "createOrForkContext",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "base_turn_id": {
+                    "type": "string",
+                    "description": "Omit for a new root context"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created context head"
+          }
+        }
+      }
+    },
+    "/v1/contexts/{context_id}": {
+      "get": {
+        "operationId": "getContext",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ContextID"
+          },
+          {
+            "name": "include_provenance",
+            "in": "query",
+            "schema": {
+              "type": "boolean",
+              "default": true
+            }
+          },
+          {
+            "name": "include_lineage",
+            "in": "query",
+            "schema": {
+              "type": "boolean",
+              "default": true
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Context head and metadata"
+          }
+        }
+      }
+    },
+    "/v1/contexts/{context_id}/children": {
+      "get": {
+        "operationId": "getContextChildren",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ContextID"
+          },
+          {
+            "name": "recursive",
+            "in": "query",
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 256
+            }
+          },
+          {
+            "name": "include_provenance",
+            "in": "query",
+            "schema": {
+              "type": "boolean",
+              "default": true
+            }
+          },
+          {
+            "name": "include_lineage",
+            "in": "query",
+            "schema": {
+              "type": "boolean",
+              "default": true
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Direct or recursive child contexts"
+          }
+        }
+      }
+    },
+    "/v1/contexts/{context_id}/turns": {
+      "get": {
+        "operationId": "getTurns",
+        "description": "List turns or hydrate one exact turn. Omit string_limit for complete content.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ContextID"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          {
+            "name": "before_turn_id",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "turn_id",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Exact turn hydration"
+          },
+          {
+            "name": "view",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "typed",
+                "raw",
+                "both"
+              ],
+              "default": "typed"
+            }
+          },
+          {
+            "name": "string_limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "description": "Maximum UTF-8 prefix bytes for MessagePack strings"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Turn page or exact hydrated turn"
+          }
+        }
+      },
+      "post": {
+        "operationId": "appendTurnAlias",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ContextID"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AppendTurn"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Appended turn"
+          }
+        }
+      }
+    },
+    "/v1/contexts/{context_id}/append": {
+      "post": {
+        "operationId": "appendTurn",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ContextID"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AppendTurn"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Appended turn"
+          }
+        }
+      }
+    },
+    "/v1/contexts/{context_id}/append-batch": {
+      "post": {
+        "operationId": "appendTurnBatch",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ContextID"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AppendTurnBatch"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Appended all turns",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AppendTurnBatchResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failure with an exact successful prefix",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AppendTurnBatchResult"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Parent conflict with an exact successful prefix",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AppendTurnBatchResult"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Storage failure with an exact successful prefix",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AppendTurnBatchResult"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/contexts/{context_id}/provenance": {
+      "get": {
+        "operationId": "getProvenance",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ContextID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Context provenance"
+          }
+        }
+      }
+    },
+    "/v1/registry/bundles/{bundle_id}": {
+      "get": {
+        "operationId": "getRegistryBundle",
+        "parameters": [
+          {
+            "name": "bundle_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Registry bundle"
+          }
+        }
+      },
+      "put": {
+        "operationId": "publishRegistryBundle",
+        "parameters": [
+          {
+            "name": "bundle_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegistryBundle"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Published"
+          },
+          "204": {
+            "description": "Already exists"
+          }
+        }
+      }
+    },
+    "/v1/registry/renderers": {
+      "get": {
+        "operationId": "getRegistryRenderers",
+        "responses": {
+          "200": {
+            "description": "Renderer manifests keyed by type ID"
+          }
+        }
+      }
+    },
+    "/v1/registry/types/{type_id}/versions/{type_version}": {
+      "get": {
+        "operationId": "getTypeDescriptor",
+        "parameters": [
+          {
+            "name": "type_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "type_version",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Type descriptor"
+          }
+        }
+      }
+    },
+    "/v1/metrics": {
+      "get": {
+        "operationId": "metrics",
+        "responses": {
+          "200": {
+            "description": "Aggregate store metrics"
+          }
+        }
+      }
+    },
+    "/v1/errors": {
+      "get": {
+        "operationId": "recentErrors",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 256,
+              "default": 50
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Bounded recent error details with query strings removed"
+          }
+        }
+      }
+    },
+    "/v1/turns/{turn_id}/fs": {
+      "get": {
+        "operationId": "listTurnFilesystem",
+        "parameters": [
+          {
+            "name": "turn_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "path",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Directory snapshot for a turn"
+          }
+        }
+      }
+    },
+    "/v1/turns/{turn_id}/fs/{path}": {
+      "get": {
+        "operationId": "getTurnFilesystemFile",
+        "parameters": [
+          {
+            "name": "turn_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "path",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "format",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "raw",
+                "json"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "File content from the turn snapshot"
+          }
+        }
+      }
+    },
+    "/v1/events": {
+      "get": {
+        "operationId": "events",
+        "responses": {
+          "200": {
+            "description": "Server-sent event stream",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "browserSession": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "cxdb_session"
+      },
+      "bearerToken": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    },
+    "parameters": {
+      "ContextID": {
+        "name": "context_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      "CSRFToken": {
+        "name": "X-CSRF-Token",
+        "in": "header",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      }
+    },
+    "schemas": {
+      "CreateToken": {
+        "type": "object",
+        "required": [
+          "name",
+          "scopes"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "scopes": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "cxdb:read",
+                "cxdb:write"
+              ]
+            }
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "CreateContext": {
+        "type": "object",
+        "properties": {
+          "base_turn_id": {
+            "type": "string",
+            "description": "Omit or use zero for a root context"
+          }
+        }
+      },
+      "AppendTurn": {
+        "type": "object",
+        "required": [
+          "type_id",
+          "type_version"
+        ],
+        "anyOf": [
+          {
+            "required": ["payload_base64"]
+          },
+          {
+            "required": ["data"]
+          },
+          {
+            "required": ["payload"]
+          }
+        ],
+        "properties": {
+          "type_id": {
+            "type": "string"
+          },
+          "type_version": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "parent_turn_id": {
+            "type": "string",
+            "description": "Omit or use zero for the current context head"
+          },
+          "payload_base64": {
+            "type": "string",
+            "contentEncoding": "base64"
+          },
+          "data": {
+            "description": "Typed JSON encoded through the matching registry descriptor"
+          },
+          "payload": {
+            "description": "Alias for data"
+          }
+        }
+      },
+      "AppendTurnBatch": {
+        "type": "object",
+        "anyOf": [
+          {
+            "required": ["turns"]
+          },
+          {
+            "required": ["items"]
+          }
+        ],
+        "properties": {
+          "turns": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "$ref": "#/components/schemas/AppendTurn"
+            }
+          },
+          "items": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "$ref": "#/components/schemas/AppendTurn"
+            }
+          }
+        }
+      },
+      "AppendTurnBatchResult": {
+        "type": "object",
+        "required": ["context_id", "turns", "partial"],
+        "properties": {
+          "context_id": {
+            "type": "string"
+          },
+          "turns": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "partial": {
+            "type": "boolean"
+          },
+          "failed_index": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "error": {
+            "type": "object"
+          }
+        }
+      },
+      "RegistryBundle": {
+        "type": "object",
+        "required": ["registry_version", "bundle_id", "types"],
+        "properties": {
+          "registry_version": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "bundle_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "types": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object"
+            }
+          },
+          "enums": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object"
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -91,7 +91,9 @@ test.describe('Copy Functionality', () => {
     await waitForDebuggerLoaded(apiPage);
 
     // Click copy all
-    await getCopyAllButton(apiPage).click();
+    const copyAllButton = getCopyAllButton(apiPage);
+    await copyAllButton.click();
+    await expect(copyAllButton).toContainText('Copied!');
 
     // Read clipboard content
     const clipboardContent = await apiPage.evaluate(async () => {

@@ -1,3 +1,6 @@
+// Copyright 2025 StrongDM Inc
+// SPDX-License-Identifier: Apache-2.0
+
 'use client';
 
 import { RefreshCw, WifiOff } from '@/components/icons';
@@ -20,8 +23,8 @@ function DashboardSkeleton() {
   return (
     <div className="w-full max-w-4xl animate-pulse">
       {/* Gauge skeleton */}
-      <div className="flex justify-center mb-8">
-        <div className="w-72 h-36 bg-theme-bg-tertiary/50 rounded-lg" />
+      <div className="mb-8 flex justify-center">
+        <div className="h-36 w-full max-w-72 rounded-lg bg-theme-bg-tertiary/50" />
       </div>
 
       {/* Cards skeleton */}
@@ -56,7 +59,7 @@ export function ServerHealthDashboard({
   // Loading state
   if (status === 'loading' && !data) {
     return (
-      <div className={cn('flex flex-col items-center justify-center p-8', className)}>
+      <div className={cn('flex flex-col items-center justify-center p-3 sm:p-8', className)}>
         <DashboardSkeleton />
       </div>
     );
@@ -65,8 +68,8 @@ export function ServerHealthDashboard({
   // Offline state (no data at all)
   if (isOffline) {
     return (
-      <div className={cn('flex flex-col items-center justify-center p-8', className)}>
-        <div className="bg-theme-bg-tertiary/80 border border-theme-border rounded-xl p-8 text-center max-w-md">
+      <div className={cn('flex flex-col items-center justify-center p-3 sm:p-8', className)}>
+        <div className="max-w-md rounded-xl border border-theme-border bg-theme-bg-tertiary/80 p-5 text-center sm:p-8">
           <WifiOff className="w-12 h-12 mx-auto mb-4 text-theme-text-dim" />
           <h2 className="text-lg font-semibold text-theme-text-secondary mb-2">Server Offline</h2>
           <p className="text-theme-text-muted mb-4">
@@ -93,10 +96,10 @@ export function ServerHealthDashboard({
   if (!data) return null;
 
   return (
-    <div className={cn('flex flex-col p-6 w-full max-w-4xl mx-auto', className)}>
+    <div className={cn('mx-auto flex w-full max-w-4xl flex-col p-3 sm:p-6', className)}>
       {/* Stale warning */}
       {isStale && (
-        <div className="w-full mb-4 px-4 py-2 bg-amber-900/20 border border-amber-500/30 rounded-lg flex items-center justify-between">
+        <div className="mb-4 flex w-full flex-col items-start justify-between gap-2 rounded-lg border border-amber-500/30 bg-amber-900/20 px-3 py-2 sm:flex-row sm:items-center sm:px-4">
           <span className="text-sm text-amber-400">
             Data may be stale &middot; Last updated: {lastUpdated}
           </span>

@@ -125,7 +125,7 @@ export async function addContext(page: Page, contextId: string | number): Promis
  * Get the "Copy all" button in the debugger.
  */
 export function getCopyAllButton(page: Page): Locator {
-  return page.locator('[data-context-debugger]').getByRole('button', { name: 'Copy all' });
+  return page.locator('[data-context-debugger] [data-copy-all]');
 }
 
 /**
