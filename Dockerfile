@@ -11,7 +11,7 @@ FROM node:20-alpine AS frontend
 WORKDIR /app
 
 # Install pnpm
-RUN corepack enable && corepack prepare pnpm@latest --activate
+RUN corepack enable && corepack prepare pnpm@9.15.9 --activate
 
 # Copy package files
 COPY frontend/package.json frontend/pnpm-lock.yaml* ./
@@ -28,7 +28,7 @@ RUN pnpm build
 # ============================================
 # Stage 2: Build Rust binary
 # ============================================
-FROM rust:1.92-bookworm AS backend
+FROM rust:1.94.1-bookworm AS backend
 
 WORKDIR /app
 

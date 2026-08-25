@@ -254,15 +254,6 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
-func containsExact(values []string, want string) bool {
-	for _, v := range values {
-		if v == want {
-			return true
-		}
-	}
-	return false
-}
-
 func parseBoolEnv(key string) bool {
 	raw := strings.TrimSpace(os.Getenv(key))
 	if raw == "" {

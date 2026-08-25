@@ -285,7 +285,7 @@ func (s *OAuthServer) TokenHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "token exchange failed", http.StatusInternalServerError)
 		return
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	var record struct {
 		ClientID, RedirectURI, Challenge, Issuer, Subject, Email, ScopesJSON string
 		ExpiresAt                                                            time.Time

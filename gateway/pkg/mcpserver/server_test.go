@@ -83,7 +83,7 @@ func TestOfficialClientHandshakeReadAndWriteTools(t *testing.T) {
 	if err != nil {
 		t.Fatalf("official MCP client handshake: %v", err)
 	}
-	defer session.Close()
+	defer func() { _ = session.Close() }()
 	if _, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "cxdb_list_contexts", Arguments: map[string]any{"limit": 1}}); err != nil {
 		t.Fatalf("read tool: %v", err)
 	}
@@ -110,7 +110,7 @@ func TestWriteToolRequiresWriteScope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer session.Close()
+	defer func() { _ = session.Close() }()
 	result, err := session.CallTool(context.Background(), &mcp.CallToolParams{Name: "cxdb_create_context", Arguments: map[string]any{}})
 	if err != nil {
 		t.Fatal(err)
@@ -215,7 +215,7 @@ func TestOAuthAccessTokenConnectsWithOfficialClient(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OAuth-backed official MCP client handshake: %v", err)
 	}
-	defer mcpSession.Close()
+	defer func() { _ = mcpSession.Close() }()
 	if _, err := mcpSession.CallTool(t.Context(), &mcp.CallToolParams{Name: "cxdb_list_contexts", Arguments: map[string]any{"limit": 1}}); err != nil {
 		t.Fatalf("OAuth-backed read tool: %v", err)
 	}

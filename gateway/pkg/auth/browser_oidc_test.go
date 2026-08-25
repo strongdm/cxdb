@@ -57,7 +57,9 @@ func TestBrowserOIDCVerifiedCodeFlowAndNonce(t *testing.T) {
 	_ = key.Set(jwk.KeyUsageKey, "sig")
 	_ = key.Set(jwk.AlgorithmKey, "RS256")
 	set := jwk.NewSet()
-	set.AddKey(key)
+	if err := set.AddKey(key); err != nil {
+		t.Fatal(err)
+	}
 	jwks, _ := json.Marshal(set)
 
 	var issuer string
@@ -91,7 +93,7 @@ func TestBrowserOIDCVerifiedCodeFlowAndNonce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	discoveryContext := oidc.ClientContext(context.Background(), provider.Client())
 	browser, err := NewBrowserOIDC(discoveryContext, issuer, "cxdb-client", "client-secret", "https://cxdb.example", []string{"example.com"}, store)
 	if err != nil {

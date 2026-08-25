@@ -46,7 +46,7 @@ func mockServer(t *testing.T, handler mockHandler) (addr string, cleanup func())
 		if err != nil {
 			return // listener closed
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 
 		// --- HELLO handshake ---
 		helloFrame, err := mockReadFrame(conn)
@@ -107,7 +107,7 @@ func mockServer(t *testing.T, handler mockHandler) (addr string, cleanup func())
 	}()
 
 	cleanup = func() {
-		ln.Close()
+		_ = ln.Close()
 		wg.Wait()
 	}
 	t.Cleanup(cleanup)
@@ -180,7 +180,7 @@ func TestGetBlob_Success(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	data, err := client.GetBlob(context.Background(), requestHash)
 	if err != nil {
@@ -200,7 +200,7 @@ func TestGetBlob_NotFound(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	var hash [32]byte
 	_, err = client.GetBlob(context.Background(), hash)
@@ -222,7 +222,7 @@ func TestGetBlob_ResponseTooShort(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	var hash [32]byte
 	_, err = client.GetBlob(context.Background(), hash)
@@ -247,7 +247,7 @@ func TestGetBlob_PayloadTruncated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	var hash [32]byte
 	_, err = client.GetBlob(context.Background(), hash)
@@ -323,7 +323,7 @@ func TestPutBlobThenGetBlob_Roundtrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	blobData := []byte("the quick brown fox jumps over the lazy dog")
 

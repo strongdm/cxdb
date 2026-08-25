@@ -141,7 +141,7 @@ func (s *SessionStore) ListAPITokens(ctx context.Context, issuer, subject string
 	if err != nil {
 		return nil, fmt.Errorf("list api tokens: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	result := make([]APIToken, 0)
 	for rows.Next() {
 		var token APIToken

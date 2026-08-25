@@ -243,7 +243,7 @@ func (c *backendClient) call(ctx context.Context, method, path string, body any)
 	if err != nil {
 		return nil, nil, fmt.Errorf("CXDB backend request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxBackendResponse+1))
 	if err != nil {
 		return nil, nil, err

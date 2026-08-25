@@ -44,7 +44,7 @@ func TestE2E_FilesystemSnapshots(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to connect to server at %s: %v\nMake sure the server is running", binaryAddr, err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	t.Logf("Connected to CXDB server, session ID: %d", client.SessionID())
 
@@ -483,9 +483,9 @@ func makePayload(t *testing.T, itemType, text string) []byte {
 	t.Helper()
 
 	item := map[uint64]any{
-		1: itemType,                       // type
-		2: "complete",                     // status
-		3: time.Now().UnixMilli(),         // timestamp
+		1: itemType,                                      // type
+		2: "complete",                                    // status
+		3: time.Now().UnixMilli(),                        // timestamp
 		4: fmt.Sprintf("test-%d", time.Now().UnixNano()), // id
 	}
 
@@ -520,7 +520,7 @@ func verifyHTTPFsListing(t *testing.T, turnID uint64, path string, expectedNames
 	if err != nil {
 		t.Fatalf("HTTP GET %s failed: %v", url, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != 200 {
 		body, _ := io.ReadAll(resp.Body)
@@ -558,7 +558,7 @@ func verifyHTTPFsFileContent(t *testing.T, turnID uint64, path string, expectedC
 	if err != nil {
 		t.Fatalf("HTTP GET %s failed: %v", url, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != 200 {
 		body, _ := io.ReadAll(resp.Body)
@@ -591,7 +591,7 @@ func verifyHTTPFsFileNotFound(t *testing.T, turnID uint64, path string) {
 	if err != nil {
 		t.Fatalf("HTTP GET %s failed: %v", url, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != 404 {
 		t.Errorf("Expected 404 for turn %d path '%s', got %d", turnID, path, resp.StatusCode)
@@ -615,7 +615,7 @@ func TestE2E_BlobDeduplication(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to connect: %v", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	// Create unique content
 	uniqueContent := []byte(fmt.Sprintf("unique content %d", time.Now().UnixNano()))
@@ -655,7 +655,7 @@ func TestE2E_FsRootInheritance(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to connect: %v", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	workDir := t.TempDir()
 	os.WriteFile(filepath.Join(workDir, "test.txt"), []byte("inherited content"), 0644)

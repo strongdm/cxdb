@@ -69,14 +69,14 @@ jobs:
           go-version: '1.22'
 
       - name: golangci-lint (clients/go)
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v9
         with:
           version: latest
           working-directory: clients/go
           args: --timeout=5m
 
       - name: golangci-lint (gateway)
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v9
         with:
           version: latest
           working-directory: gateway

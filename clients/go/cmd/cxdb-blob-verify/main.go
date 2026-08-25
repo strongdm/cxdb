@@ -69,7 +69,7 @@ func main() {
 	// --- Test 1: PutBlob + GetBlob round-trip ---
 	run("PutBlob + GetBlob round-trip", func() error {
 		client := dial()
-		defer client.Close()
+		defer func() { _ = client.Close() }()
 
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -100,7 +100,7 @@ func main() {
 	// --- Test 2: GetBlob nonexistent hash returns ErrBlobNotFound ---
 	run("GetBlob nonexistent hash (expect ErrBlobNotFound)", func() error {
 		client := dial()
-		defer client.Close()
+		defer func() { _ = client.Close() }()
 
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -123,7 +123,7 @@ func main() {
 	// --- Test 3: PutBlobIfAbsent deduplication ---
 	run("PutBlobIfAbsent deduplication", func() error {
 		client := dial()
-		defer client.Close()
+		defer func() { _ = client.Close() }()
 
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -166,7 +166,7 @@ func main() {
 	// --- Test 4: Large blob (1 MiB) ---
 	run("Large blob (1 MiB) round-trip", func() error {
 		client := dial()
-		defer client.Close()
+		defer func() { _ = client.Close() }()
 
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
@@ -196,7 +196,7 @@ func main() {
 	// --- Test 5: Connection survives a not-found ---
 	run("Connection survives not-found", func() error {
 		client := dial()
-		defer client.Close()
+		defer func() { _ = client.Close() }()
 
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -244,7 +244,7 @@ func main() {
 		if err != nil {
 			return fmt.Errorf("DialReconnecting: %w", err)
 		}
-		defer rc.Close()
+		defer func() { _ = rc.Close() }()
 
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()

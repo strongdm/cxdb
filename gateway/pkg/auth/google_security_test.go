@@ -15,7 +15,7 @@ func TestGooglePostAuthRedirectUsesConfiguredPublicURL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	google := &GoogleAuth{
 		publicURL:    "https://cxdb.example",

@@ -128,7 +128,7 @@ func TestProductionHandlerPersonalTokenLifecycleAndAPIUse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer meResponse.Body.Close()
+	defer func() { _ = meResponse.Body.Close() }()
 	var me struct {
 		CSRFToken string `json:"csrf_token"`
 	}
@@ -143,7 +143,7 @@ func TestProductionHandlerPersonalTokenLifecycleAndAPIUse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer createResponse.Body.Close()
+	defer func() { _ = createResponse.Body.Close() }()
 	var created struct {
 		Token     auth.APIToken `json:"token"`
 		Plaintext string        `json:"plaintext"`
@@ -158,7 +158,9 @@ func TestProductionHandlerPersonalTokenLifecycleAndAPIUse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	apiResponse.Body.Close()
+	if err := apiResponse.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
 	if apiResponse.StatusCode != http.StatusOK {
 		t.Fatalf("API token request status = %d", apiResponse.StatusCode)
 	}
@@ -169,7 +171,9 @@ func TestProductionHandlerPersonalTokenLifecycleAndAPIUse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	revokeResponse.Body.Close()
+	if err := revokeResponse.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
 	if revokeResponse.StatusCode != http.StatusNoContent {
 		t.Fatalf("revoke response status = %d", revokeResponse.StatusCode)
 	}
@@ -180,7 +184,9 @@ func TestProductionHandlerPersonalTokenLifecycleAndAPIUse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	revokedResponse.Body.Close()
+	if err := revokedResponse.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
 	if revokedResponse.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("revoked token status = %d", revokedResponse.StatusCode)
 	}

@@ -46,7 +46,11 @@ func main() {
 		logger.Error("session store init failed", "err", err)
 		os.Exit(1)
 	}
-	defer sessionStore.Close()
+	defer func() {
+		if err := sessionStore.Close(); err != nil {
+			logger.Error("session store close failed", "err", err)
+		}
+	}()
 
 	var googleAuth *auth.GoogleAuth
 	if cfg.GoogleClientID != "" {

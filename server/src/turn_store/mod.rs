@@ -700,7 +700,7 @@ impl TurnStore {
     pub fn list_recent_contexts(&self, limit: u32) -> Vec<ContextHead> {
         let mut contexts: Vec<ContextHead> = self.heads.values().cloned().collect();
         // Sort by created_at descending (most recent first)
-        contexts.sort_by(|a, b| b.created_at_unix_ms.cmp(&a.created_at_unix_ms));
+        contexts.sort_by_key(|context| std::cmp::Reverse(context.created_at_unix_ms));
         contexts.truncate(limit as usize);
         contexts
     }
