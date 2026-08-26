@@ -6,6 +6,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -31,6 +32,7 @@ type Config struct {
 
 	PublicBaseURL      string
 	PublicAllowedHosts []string
+	TrustedProxyCIDRs  []string
 
 	SessionSecret string
 	DatabasePath  string
@@ -90,6 +92,7 @@ func Load() (Config, error) {
 		GoogleClientSecret:  strings.TrimSpace(os.Getenv("GOOGLE_CLIENT_SECRET")),
 		PublicBaseURL:       firstNonEmpty(os.Getenv("PUBLIC_BASE_URL"), defaultBaseURL),
 		PublicAllowedHosts:  splitAndTrim(firstNonEmpty(os.Getenv("PUBLIC_ALLOWED_HOSTS"), "")),
+		TrustedProxyCIDRs:   splitAndTrim(firstNonEmpty(os.Getenv("TRUSTED_PROXY_CIDRS"), "")),
 		SessionSecret:       strings.TrimSpace(os.Getenv("SESSION_SECRET")),
 		DatabasePath:        firstNonEmpty(os.Getenv("DATABASE_PATH"), defaultDBPath),
 		Port:                firstNonEmpty(os.Getenv("PORT"), defaultPort),
@@ -217,6 +220,11 @@ func (c Config) validate() error {
 	}
 	if _, err := url.Parse(c.CXDBBackendURL); err != nil {
 		return errors.New("invalid CXDB_BACKEND_URL")
+	}
+	for _, cidr := range c.TrustedProxyCIDRs {
+		if _, _, err := net.ParseCIDR(cidr); err != nil {
+			return fmt.Errorf("invalid TRUSTED_PROXY_CIDRS entry %q", cidr)
+		}
 	}
 	return nil
 }

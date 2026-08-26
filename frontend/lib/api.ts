@@ -28,8 +28,10 @@ export class ApiError extends Error {
 async function authApiError(response: Response): Promise<ApiError> {
   let message = `HTTP ${response.status}`;
   let errorData: ErrorResponse | undefined;
+  let text = '';
   try {
-    const body: unknown = await response.json();
+    text = await response.text();
+    const body: unknown = JSON.parse(text);
     if (typeof body === 'object' && body !== null) {
       const value = body as { error?: unknown; message?: unknown };
       if (typeof value.error === 'string') message = value.error;
@@ -42,12 +44,7 @@ async function authApiError(response: Response): Promise<ApiError> {
       if (!errorData) errorData = { error: { message, code: response.status } };
     }
   } catch {
-    try {
-      const text = await response.text();
-      if (text.trim()) message = text.trim();
-    } catch {
-      // Keep the status message.
-    }
+    if (text.trim()) message = text.trim();
   }
   return new ApiError(message, response.status, errorData);
 }

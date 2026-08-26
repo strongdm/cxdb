@@ -24,4 +24,7 @@ All notable changes to this project are documented in this file.
 
 ### Compatibility
 
-- This change has no known breaking API or stored-data changes.
+- Gateway deployments must now provide a `SESSION_SECRET` of at least 32 bytes.
+- Non-GET API requests now require authentication with the `cxdb:write` scope.
+- Scoped credentials used with context, metrics, and event reads must include `cxdb:read`. Existing browser sessions and built-in service credentials receive both scopes.
+- There are no known breaking stored-data changes.

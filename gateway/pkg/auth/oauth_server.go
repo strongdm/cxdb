@@ -81,10 +81,19 @@ func NewOAuthServer(store *SessionStore, publicBaseURL, loginPath string) (*OAut
 		last_used_at TIMESTAMP,
 		revoked_at TIMESTAMP
 	);
+	CREATE TABLE IF NOT EXISTS oauth_code_tokens (
+		code_hash TEXT NOT NULL,
+		token_hash TEXT PRIMARY KEY,
+		created_at TIMESTAMP NOT NULL
+	);
 	CREATE INDEX IF NOT EXISTS idx_oauth_access_tokens_owner ON oauth_access_tokens(owner_issuer, owner_subject);
+	CREATE INDEX IF NOT EXISTS idx_oauth_code_tokens_code ON oauth_code_tokens(code_hash);
 	`
 	if _, err := store.db.Exec(schema); err != nil {
 		return nil, fmt.Errorf("initialize OAuth schema: %w", err)
+	}
+	if err := s.pruneExpiredOAuthRecords(context.Background(), time.Now().UTC()); err != nil {
+		return nil, fmt.Errorf("prune expired OAuth records: %w", err)
 	}
 	return s, nil
 }
@@ -220,6 +229,7 @@ func (s *OAuthServer) AuthorizeHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *OAuthServer) completeAuthorization(w http.ResponseWriter, r *http.Request) {
+	_ = s.pruneExpiredOAuthRecords(r.Context(), time.Now().UTC())
 	if err := r.ParseForm(); err != nil {
 		oauthError(w, http.StatusBadRequest, "invalid_request", "invalid form")
 		return
@@ -272,7 +282,9 @@ func (s *OAuthServer) TokenHandler(w http.ResponseWriter, r *http.Request) {
 		oauthError(w, http.StatusBadRequest, "unsupported_grant_type", "authorization_code is required")
 		return
 	}
+	_ = s.pruneExpiredOAuthRecords(r.Context(), time.Now().UTC())
 	code := r.Form.Get("code")
+	codeHash := s.hash("code", code)
 	clientID := r.Form.Get("client_id")
 	redirectURI := r.Form.Get("redirect_uri")
 	verifier := r.Form.Get("code_verifier")
@@ -291,20 +303,28 @@ func (s *OAuthServer) TokenHandler(w http.ResponseWriter, r *http.Request) {
 		ExpiresAt                                                            time.Time
 		UsedAt                                                               sql.NullTime
 	}
-	err = tx.QueryRowContext(r.Context(), `SELECT client_id, redirect_uri, code_challenge, owner_issuer, owner_subject, email, scopes_json, expires_at, used_at FROM oauth_authorization_codes WHERE code_hash = ?`, s.hash("code", code)).Scan(
+	err = tx.QueryRowContext(r.Context(), `SELECT client_id, redirect_uri, code_challenge, owner_issuer, owner_subject, email, scopes_json, expires_at, used_at FROM oauth_authorization_codes WHERE code_hash = ?`, codeHash).Scan(
 		&record.ClientID, &record.RedirectURI, &record.Challenge, &record.Issuer, &record.Subject, &record.Email, &record.ScopesJSON, &record.ExpiresAt, &record.UsedAt,
 	)
-	if err != nil || record.UsedAt.Valid || time.Now().After(record.ExpiresAt) || record.ClientID != clientID || record.RedirectURI != redirectURI || !verifyPKCES256(verifier, record.Challenge) {
+	if err != nil || time.Now().After(record.ExpiresAt) || record.ClientID != clientID || record.RedirectURI != redirectURI || !verifyPKCES256(verifier, record.Challenge) {
 		oauthError(w, http.StatusBadRequest, "invalid_grant", "authorization code is invalid")
 		return
 	}
-	result, err := tx.ExecContext(r.Context(), `UPDATE oauth_authorization_codes SET used_at = ? WHERE code_hash = ? AND used_at IS NULL`, time.Now().UTC(), s.hash("code", code))
+	if record.UsedAt.Valid {
+		_ = tx.Rollback()
+		s.revokeTokensForCode(r.Context(), codeHash)
+		oauthError(w, http.StatusBadRequest, "invalid_grant", "authorization code is invalid")
+		return
+	}
+	result, err := tx.ExecContext(r.Context(), `UPDATE oauth_authorization_codes SET used_at = ? WHERE code_hash = ? AND used_at IS NULL`, time.Now().UTC(), codeHash)
 	if err != nil {
 		http.Error(w, "token exchange failed", http.StatusInternalServerError)
 		return
 	}
 	rows, _ := result.RowsAffected()
 	if rows != 1 {
+		_ = tx.Rollback()
+		s.revokeTokensForCode(r.Context(), codeHash)
 		oauthError(w, http.StatusBadRequest, "invalid_grant", "authorization code is invalid")
 		return
 	}
@@ -315,7 +335,12 @@ func (s *OAuthServer) TokenHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	now := time.Now().UTC()
 	expires := now.Add(oauthTokenTTL)
-	if _, err := tx.ExecContext(r.Context(), `INSERT INTO oauth_access_tokens (token_hash, owner_issuer, owner_subject, email, scopes_json, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)`, s.hash("access", accessToken), record.Issuer, record.Subject, record.Email, record.ScopesJSON, now, expires); err != nil {
+	tokenHash := s.hash("access", accessToken)
+	if _, err := tx.ExecContext(r.Context(), `INSERT INTO oauth_access_tokens (token_hash, owner_issuer, owner_subject, email, scopes_json, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)`, tokenHash, record.Issuer, record.Subject, record.Email, record.ScopesJSON, now, expires); err != nil {
+		http.Error(w, "token exchange failed", http.StatusInternalServerError)
+		return
+	}
+	if _, err := tx.ExecContext(r.Context(), `INSERT INTO oauth_code_tokens (code_hash, token_hash, created_at) VALUES (?, ?, ?)`, codeHash, tokenHash, now); err != nil {
 		http.Error(w, "token exchange failed", http.StatusInternalServerError)
 		return
 	}
@@ -334,7 +359,13 @@ func (s *OAuthServer) Verify(token string) (*Session, error) {
 	var scopesJSON string
 	var revoked sql.NullTime
 	err := s.store.db.QueryRow(`SELECT owner_issuer, owner_subject, email, scopes_json, expires_at, revoked_at FROM oauth_access_tokens WHERE token_hash = ?`, s.hash("access", token)).Scan(&session.Issuer, &session.Subject, &session.Email, &scopesJSON, &session.ExpiresAt, &revoked)
-	if err != nil || revoked.Valid || time.Now().After(session.ExpiresAt) {
+	if err != nil || revoked.Valid {
+		return nil, errors.New("invalid OAuth access token")
+	}
+	if time.Now().After(session.ExpiresAt) {
+		tokenHash := s.hash("access", token)
+		_, _ = s.store.db.Exec(`DELETE FROM oauth_code_tokens WHERE token_hash = ?`, tokenHash)
+		_, _ = s.store.db.Exec(`DELETE FROM oauth_access_tokens WHERE token_hash = ?`, tokenHash)
 		return nil, errors.New("invalid OAuth access token")
 	}
 	if err := json.Unmarshal([]byte(scopesJSON), &session.Scopes); err != nil {
@@ -345,6 +376,33 @@ func (s *OAuthServer) Verify(token string) (*Session, error) {
 	session.AuthMethod = "oauth_access_token"
 	_, _ = s.store.db.Exec(`UPDATE oauth_access_tokens SET last_used_at = ? WHERE token_hash = ?`, time.Now().UTC(), s.hash("access", token))
 	return &session, nil
+}
+
+func (s *OAuthServer) revokeTokensForCode(ctx context.Context, codeHash string) {
+	_, _ = s.store.db.ExecContext(ctx, `
+		UPDATE oauth_access_tokens
+		SET revoked_at = ?
+		WHERE revoked_at IS NULL
+		  AND token_hash IN (SELECT token_hash FROM oauth_code_tokens WHERE code_hash = ?)
+	`, time.Now().UTC(), codeHash)
+}
+
+func (s *OAuthServer) pruneExpiredOAuthRecords(ctx context.Context, now time.Time) error {
+	tx, err := s.store.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM oauth_code_tokens WHERE code_hash IN (SELECT code_hash FROM oauth_authorization_codes WHERE expires_at < ?) OR token_hash IN (SELECT token_hash FROM oauth_access_tokens WHERE expires_at < ?)`, now, now); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM oauth_authorization_codes WHERE expires_at < ?`, now); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM oauth_access_tokens WHERE expires_at < ?`, now); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *OAuthServer) parseAuthorizationRequest(values url.Values) (oauthAuthorizationRequest, error) {

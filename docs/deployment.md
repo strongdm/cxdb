@@ -68,6 +68,7 @@ Internet
 | `SESSION_SECRET` | Yes | 64-char hex string for cookie signing |
 | `DATABASE_PATH` | No | Session DB path (default: ./data/sessions.db) |
 | `ALLOWED_RENDERER_ORIGINS` | No | CSP script-src origins (comma-separated) |
+| `TRUSTED_PROXY_CIDRS` | No | CIDRs of reverse proxies whose X-Forwarded-For chain can identify clients for auth rate limits |
 | `DEV_MODE` | No | Disable OAuth (development only) |
 
 ### Generating Secrets

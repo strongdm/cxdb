@@ -91,6 +91,9 @@ func TestOAuthAuthorizationCodePKCEAndSingleUse(t *testing.T) {
 	if replayResponse.Code != http.StatusBadRequest || !strings.Contains(replayResponse.Body.String(), "invalid_grant") {
 		t.Fatalf("code replay accepted: status=%d body=%s", replayResponse.Code, replayResponse.Body.String())
 	}
+	if _, err := server.Verify(tokenPayload["access_token"].(string)); err == nil {
+		t.Fatal("authorization-code replay did not revoke the issued access token")
+	}
 }
 
 func TestOAuthRegistrationRejectsUnsafeRedirects(t *testing.T) {

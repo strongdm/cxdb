@@ -66,7 +66,6 @@ func New(backendURL, resourceMetadataURL string, verifiers []cxdbauth.BearerToke
 	}
 	return mcpauth.RequireBearerToken(verifier, &mcpauth.RequireBearerTokenOptions{
 		ResourceMetadataURL: resourceMetadataURL,
-		Scopes:              []string{"cxdb:read"},
 	})(originProtected), nil
 }
 
@@ -298,17 +297,17 @@ func canonicalMessage(role, text string) ([]byte, error) {
 	if text == "" {
 		return nil, errors.New("text is required")
 	}
-	item := map[string]any{"status": "complete", "timestamp": time.Now().UnixMilli()}
+	item := map[int]any{2: "complete", 3: time.Now().UnixMilli()}
 	switch role {
 	case "user":
-		item["item_type"] = "user_input"
-		item["user_input"] = map[string]any{"text": text}
+		item[1] = "user_input"
+		item[10] = map[int]any{1: text}
 	case "assistant":
-		item["item_type"] = "assistant_turn"
-		item["turn"] = map[string]any{"text": text}
+		item[1] = "assistant_turn"
+		item[11] = map[int]any{1: text}
 	case "system":
-		item["item_type"] = "system"
-		item["system"] = map[string]any{"text": text, "kind": "info"}
+		item[1] = "system"
+		item[12] = map[int]any{1: "info", 3: text}
 	default:
 		return nil, errors.New("role must be user, assistant, or system")
 	}

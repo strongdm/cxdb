@@ -159,8 +159,8 @@ pub fn project_turn(
     options: &TurnProjectionOptions<'_>,
 ) -> Result<JsonValue> {
     let declared_type_id = item.meta.declared_type_id.clone();
-    let (decoded_type_id, decoded_type_version) = match options.type_hint_mode {
-        "explicit" => (
+    let decoded_type = match options.type_hint_mode {
+        "explicit" => Ok((
             options
                 .as_type_id
                 .ok_or_else(|| StoreError::InvalidInput("as_type_id required".into()))?
@@ -168,14 +168,12 @@ pub fn project_turn(
             options
                 .as_type_version
                 .ok_or_else(|| StoreError::InvalidInput("as_type_version required".into()))?,
-        ),
-        "latest" => {
-            let latest = registry
-                .get_latest_type_version(&declared_type_id)
-                .ok_or_else(|| StoreError::NotFound("type descriptor".into()))?;
-            (declared_type_id.clone(), latest.version)
-        }
-        _ => (declared_type_id.clone(), item.meta.declared_type_version),
+        )),
+        "latest" => registry
+            .get_latest_type_version(&declared_type_id)
+            .map(|latest| (declared_type_id.clone(), latest.version))
+            .ok_or_else(|| StoreError::NotFound("type descriptor".into())),
+        _ => Ok((declared_type_id.clone(), item.meta.declared_type_version)),
     };
     let mut turn = Map::new();
     turn.insert(
@@ -189,21 +187,34 @@ pub fn project_turn(
     turn.insert("depth".into(), JsonValue::Number(item.record.depth.into()));
     turn.insert("declared_type".into(), serde_json::json!({"type_id": declared_type_id, "type_version": item.meta.declared_type_version}));
     if options.view == "typed" || options.view == "both" {
-        let descriptor = registry
-            .get_type_version(&decoded_type_id, decoded_type_version)
-            .ok_or_else(|| StoreError::NotFound("type descriptor".into()))?;
-        let payload = item
-            .payload
-            .as_ref()
-            .ok_or_else(|| StoreError::InvalidInput("payload not loaded".into()))?;
-        let projected = project_msgpack(payload, descriptor, registry, options.render)?;
-        turn.insert(
-            "decoded_as".into(),
-            serde_json::json!({"type_id": decoded_type_id, "type_version": decoded_type_version}),
-        );
-        turn.insert("data".into(), projected.data);
-        if let Some(unknown) = projected.unknown {
-            turn.insert("unknown".into(), unknown);
+        let projected = decoded_type.and_then(|(decoded_type_id, decoded_type_version)| {
+            let descriptor = registry
+                .get_type_version(&decoded_type_id, decoded_type_version)
+                .ok_or_else(|| StoreError::NotFound("type descriptor".into()))?;
+            let payload = item
+                .payload
+                .as_ref()
+                .ok_or_else(|| StoreError::InvalidInput("payload not loaded".into()))?;
+            let projected = project_msgpack(payload, descriptor, registry, options.render)?;
+            Ok((decoded_type_id, decoded_type_version, projected))
+        });
+        match projected {
+            Ok((decoded_type_id, decoded_type_version, projected)) => {
+                turn.insert(
+                    "decoded_as".into(),
+                    serde_json::json!({"type_id": decoded_type_id, "type_version": decoded_type_version}),
+                );
+                turn.insert("data".into(), projected.data);
+                if let Some(unknown) = projected.unknown {
+                    turn.insert("unknown".into(), unknown);
+                }
+            }
+            Err(error) => {
+                turn.insert(
+                    "projection_error".into(),
+                    serde_json::json!({"message": error.to_string()}),
+                );
+            }
         }
     }
     if options.view == "raw" || options.view == "both" {
@@ -261,6 +272,11 @@ pub fn project_msgpack(
     let mut cursor = std::io::Cursor::new(payload);
     let value = rmpv::decode::read_value(&mut cursor)
         .map_err(|e| StoreError::InvalidInput(format!("msgpack decode error: {e}")))?;
+    if cursor.position() != payload.len() as u64 {
+        return Err(StoreError::InvalidInput(
+            "payload contains trailing msgpack data".into(),
+        ));
+    }
     if !matches!(value, Value::Map(_)) {
         return Err(StoreError::InvalidInput("payload is not a map".into()));
     }
@@ -410,6 +426,10 @@ fn render_type_ref(
         // Fall back to raw rendering if type not found
         return render_value(value, options);
     };
+
+    if !matches!(value, Value::Map(_)) {
+        return render_value(value, options);
+    }
 
     // Normalize the value to a tag map
     let map = normalize_fields(value, type_spec);

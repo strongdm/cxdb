@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -28,6 +28,9 @@ use crate::store::Store;
 
 type HttpResponse = (u16, Response<std::io::Cursor<Vec<u8>>>);
 const MAX_HTTP_PAYLOAD_BYTES: usize = 4 * 1024 * 1024;
+const MAX_HTTP_JSON_BODY_BYTES: usize = 24 * 1024 * 1024;
+const MAX_APPEND_BATCH_ITEMS: usize = 256;
+const MAX_APPEND_BATCH_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
 
 pub fn start_http(
     bind_addr: String,
@@ -667,7 +670,9 @@ fn handle_request(
                 let payload_bytes = if let Some(encoded) =
                     body.get("payload_base64").and_then(JsonValue::as_str)
                 {
-                    decode_http_payload_base64(encoded)?
+                    let payload = decode_http_payload_base64(encoded)?;
+                    validate_http_payload(&payload)?;
+                    payload
                 } else {
                     let payload_json = body
                         .get("data")
@@ -757,11 +762,36 @@ fn handle_request(
                     .ok_or_else(|| {
                         StoreError::InvalidInput("missing required field: turns".into())
                     })?;
+                if items.is_empty() {
+                    return Err(StoreError::InvalidInput(
+                        "append batch must contain at least one turn".into(),
+                    ));
+                }
+                if items.len() > MAX_APPEND_BATCH_ITEMS {
+                    return Err(StoreError::InvalidInput(format!(
+                        "append batch must contain at most {MAX_APPEND_BATCH_ITEMS} turns"
+                    )));
+                }
                 let registry_guard = registry.lock().unwrap();
                 let mut prepared = Vec::with_capacity(items.len());
+                let mut total_payload_bytes = 0usize;
                 for (index, item) in items.iter().enumerate() {
                     match prepare_batch_item(item, &registry_guard) {
-                        Ok(prepared_item) => prepared.push(prepared_item),
+                        Ok(prepared_item) => {
+                            total_payload_bytes = total_payload_bytes
+                                .checked_add(prepared_item.2.len())
+                                .ok_or_else(|| {
+                                    StoreError::InvalidInput(
+                                        "append batch payload size overflow".into(),
+                                    )
+                                })?;
+                            if total_payload_bytes > MAX_APPEND_BATCH_PAYLOAD_BYTES {
+                                return Err(StoreError::InvalidInput(
+                                    "append batch payloads must total at most 16 MiB".into(),
+                                ));
+                            }
+                            prepared.push(prepared_item)
+                        }
                         Err(error) => {
                             return batch_failure_response(context_id, &[], index, &error)
                         }
@@ -1462,7 +1492,15 @@ fn parse_base_turn_id(
 
 fn parse_json_body(request: &mut tiny_http::Request) -> Result<JsonValue> {
     let mut body = Vec::new();
-    request.as_reader().read_to_end(&mut body)?;
+    request
+        .as_reader()
+        .take((MAX_HTTP_JSON_BODY_BYTES + 1) as u64)
+        .read_to_end(&mut body)?;
+    if body.len() > MAX_HTTP_JSON_BODY_BYTES {
+        return Err(StoreError::InvalidInput(
+            "json request body must be at most 24 MiB".into(),
+        ));
+    }
     if body.is_empty() {
         return Ok(JsonValue::Object(Map::new()));
     }
@@ -1501,6 +1539,21 @@ fn decode_http_payload_base64(encoded: &str) -> Result<Vec<u8>> {
     Ok(payload)
 }
 
+fn validate_http_payload(payload: &[u8]) -> Result<()> {
+    let mut cursor = std::io::Cursor::new(payload);
+    let value = rmpv::decode::read_value(&mut cursor)
+        .map_err(|e| StoreError::InvalidInput(format!("msgpack decode error: {e}")))?;
+    if cursor.position() != payload.len() as u64 {
+        return Err(StoreError::InvalidInput(
+            "payload contains trailing msgpack data".into(),
+        ));
+    }
+    if !matches!(value, MsgpackValue::Map(_)) {
+        return Err(StoreError::InvalidInput("payload is not a map".into()));
+    }
+    Ok(())
+}
+
 fn prepare_batch_item(
     item: &JsonValue,
     registry: &Registry,
@@ -1508,7 +1561,9 @@ fn prepare_batch_item(
     let type_id = get_required_string(item, "type_id")?;
     let type_version = get_required_u32(item, "type_version")?;
     let payload = if let Some(encoded) = item.get("payload_base64").and_then(JsonValue::as_str) {
-        decode_http_payload_base64(encoded)?
+        let payload = decode_http_payload_base64(encoded)?;
+        validate_http_payload(&payload)?;
+        payload
     } else {
         let value = item
             .get("data")
@@ -2095,6 +2150,31 @@ mod tests {
                 .encode(vec![0_u8; MAX_HTTP_PAYLOAD_BYTES + 1]);
         let error = decode_http_payload_base64(&encoded).expect_err("oversized payload");
         assert!(error.to_string().contains("at most 4 MiB"));
+    }
+
+    #[test]
+    fn validate_http_payload_requires_complete_msgpack_map() {
+        let mut valid = Vec::new();
+        rmpv::encode::write_value(
+            &mut valid,
+            &MsgpackValue::Map(vec![(
+                MsgpackValue::Integer(1.into()),
+                MsgpackValue::String("hello".into()),
+            )]),
+        )
+        .expect("encode map");
+        validate_http_payload(&valid).expect("valid payload");
+
+        let mut trailing = valid.clone();
+        trailing.push(0xc0);
+        assert!(validate_http_payload(&trailing)
+            .expect_err("trailing data")
+            .to_string()
+            .contains("trailing"));
+        assert!(validate_http_payload(&[0xc0])
+            .expect_err("non-map")
+            .to_string()
+            .contains("not a map"));
     }
 
     #[test]

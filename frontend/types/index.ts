@@ -16,6 +16,7 @@ export interface Turn {
   decoded_as?: DeclaredType;
   data?: Record<string, unknown>;
   unknown?: Record<string, unknown>;
+  projection_error?: { message: string };
   raw?: string; // base64-encoded raw payload when view=raw or view=both
 }
 

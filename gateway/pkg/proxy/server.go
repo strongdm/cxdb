@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -36,9 +37,10 @@ type Server struct {
 	logger   *slog.Logger
 	staticFS fs.FS
 
-	cspHeader   string
-	hstsEnabled bool
-	limiters    *ipRateLimiter
+	cspHeader            string
+	hstsEnabled          bool
+	limiters             *ipRateLimiter
+	trustedProxyNetworks []*net.IPNet
 
 	// Service-to-service auth verifiers (optional)
 	tokenVerifiers []auth.BearerTokenVerifier
@@ -79,6 +81,13 @@ func New(cfg config.Config, sessions *auth.SessionStore, google *auth.GoogleAuth
 		}, "; "),
 		hstsEnabled: strings.HasPrefix(strings.ToLower(cfg.PublicBaseURL), "https://"),
 		limiters:    newIPRateLimiter(rate.Limit(5), 10),
+	}
+	for _, cidr := range cfg.TrustedProxyCIDRs {
+		_, network, err := net.ParseCIDR(cidr)
+		if err != nil {
+			return nil, fmt.Errorf("parse trusted proxy CIDR %q: %w", cidr, err)
+		}
+		s.trustedProxyNetworks = append(s.trustedProxyNetworks, network)
 	}
 
 	if cfg.OIDCEnabled {
@@ -456,7 +465,7 @@ func (s *Server) rateLimitMiddleware(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		ip := observedPeerIP(r)
+		ip := rateLimitClientIP(r, s.trustedProxyNetworks)
 		limiter := s.limiters.get(ip)
 		if !limiter.Allow() {
 			s.logger.Warn("rate_limit_exceeded", "ip", ip, "path", r.URL.Path)

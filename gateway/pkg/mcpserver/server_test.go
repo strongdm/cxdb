@@ -22,6 +22,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	cxdbauth "github.com/strongdm/cxdb/gateway/pkg/auth"
+	"github.com/vmihailenco/msgpack/v5"
 )
 
 type staticVerifier struct{ scopes []string }
@@ -117,6 +118,73 @@ func TestWriteToolRequiresWriteScope(t *testing.T) {
 	}
 	if !result.IsError {
 		t.Fatal("read-only token was allowed to call a write tool")
+	}
+}
+
+func TestWriteOnlyTokenCanConnectAndUseWriteTool(t *testing.T) {
+	var created bool
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/v1/contexts/create" {
+			created = true
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"context_id":"1"}`)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(backend.Close)
+	handler, err := New(backend.URL, "https://cxdb.example/metadata", []cxdbauth.BearerTokenVerifier{staticVerifier{scopes: []string{"cxdb:write"}}}, slog.Default())
+	if err != nil {
+		t.Fatal(err)
+	}
+	remote := httptest.NewServer(handler)
+	t.Cleanup(remote.Close)
+	client := mcp.NewClient(&mcp.Implementation{Name: "cxdb-test", Version: "1"}, nil)
+	session, err := client.Connect(context.Background(), &mcp.StreamableClientTransport{Endpoint: remote.URL, HTTPClient: &http.Client{Transport: bearerTransport{base: http.DefaultTransport, token: "test-token"}}, DisableStandaloneSSE: true}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = session.Close() }()
+	result, err := session.CallTool(context.Background(), &mcp.CallToolParams{Name: "cxdb_create_context", Arguments: map[string]any{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError || !created {
+		t.Fatalf("write-only token did not create context: result=%+v created=%v", result, created)
+	}
+}
+
+func TestCanonicalMessagesUseNumericTags(t *testing.T) {
+	tests := []struct {
+		role       string
+		variantTag int
+		textTag    int
+	}{
+		{role: "user", variantTag: 10, textTag: 1},
+		{role: "assistant", variantTag: 11, textTag: 1},
+		{role: "system", variantTag: 12, textTag: 3},
+	}
+	for _, test := range tests {
+		t.Run(test.role, func(t *testing.T) {
+			payload, err := canonicalMessage(test.role, "hello")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var item map[int]msgpack.RawMessage
+			if err := msgpack.Unmarshal(payload, &item); err != nil {
+				t.Fatal(err)
+			}
+			var variant map[int]string
+			if err := msgpack.Unmarshal(item[test.variantTag], &variant); err != nil {
+				t.Fatalf("decode variant tag %d: %v", test.variantTag, err)
+			}
+			if got := variant[test.textTag]; got != "hello" {
+				t.Fatalf("text tag %d = %#v", test.textTag, got)
+			}
+			if _, exists := item[0]; exists {
+				t.Fatal("unexpected zero tag")
+			}
+		})
 	}
 }
 

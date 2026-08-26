@@ -277,21 +277,25 @@ impl Store {
         turns: Vec<TurnRecord>,
         include_payload: bool,
     ) -> Result<Vec<TurnWithMeta>> {
-        let payloads = if include_payload {
+        let payloads: Vec<Option<Vec<u8>>> = if include_payload {
             let hashes: Vec<_> = turns.iter().map(|turn| turn.payload_hash).collect();
-            Some(self.blob_store.get_many(&hashes)?)
+            self.blob_store
+                .get_many(&hashes)?
+                .into_iter()
+                .map(Some)
+                .collect()
         } else {
-            None
+            std::iter::repeat_with(|| None).take(turns.len()).collect()
         };
         turns
             .into_iter()
-            .enumerate()
-            .map(|(index, record)| {
+            .zip(payloads)
+            .map(|(record, payload)| {
                 let meta = self.turn_store.get_turn_meta(record.turn_id)?;
                 Ok(TurnWithMeta {
                     record,
                     meta,
-                    payload: payloads.as_ref().map(|items| items[index].clone()),
+                    payload,
                 })
             })
             .collect()

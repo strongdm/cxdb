@@ -3,7 +3,10 @@
 
 package config
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestValidateRequiresStrongSessionSecret(t *testing.T) {
 	cfg := Config{SessionSecret: "short", CXDBBackendURL: "http://127.0.0.1:9010"}
@@ -20,6 +23,18 @@ func TestValidateAcceptsStrongSessionSecretWithoutGoogleWhenDevMode(t *testing.T
 	}
 	if err := cfg.validate(); err != nil {
 		t.Fatalf("strong development configuration rejected: %v", err)
+	}
+}
+
+func TestValidateRejectsInvalidTrustedProxyCIDR(t *testing.T) {
+	cfg := Config{
+		SessionSecret:     strings.Repeat("s", 32),
+		CXDBBackendURL:    "http://127.0.0.1:9010",
+		DevMode:           true,
+		TrustedProxyCIDRs: []string{"not-a-cidr"},
+	}
+	if err := cfg.validate(); err == nil || !strings.Contains(err.Error(), "TRUSTED_PROXY_CIDRS") {
+		t.Fatalf("validate() error = %v", err)
 	}
 }
 

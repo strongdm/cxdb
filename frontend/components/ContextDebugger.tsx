@@ -5,7 +5,7 @@
 
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import type { Turn, TurnResponse, DebugEvent } from '@/types';
-import { Layers, Hash, X, Copy, Search, Loader2, AlertCircle, GitBranch, ChevronDown, ChevronRight, Terminal, MessageSquare, Wrench, CheckCircle, XCircle, Folder, Zap, Database } from './icons';
+import { Layers, Hash, X, Copy, Search, Loader2, AlertCircle, AlertTriangle, GitBranch, ChevronDown, ChevronRight, Terminal, MessageSquare, Wrench, CheckCircle, XCircle, Folder, Zap, Database } from './icons';
 import { cn, trunc, safeStringify, formatTime, contentPreview } from '@/lib/utils';
 import { fetchTurn, fetchTurns, fetchFsDirectory, ApiError } from '@/lib/api';
 import { FileBrowser } from './FileBrowser';
@@ -691,23 +691,27 @@ export function ContextDebugger({ contextId, isOpen, onClose, lastEvent, initial
         include_unknown: true,
         string_limit: TURN_LIST_STRING_LIMIT,
       });
+      const seen = new Set(data.turns.map(turn => turn.turn_id));
+      const olderTurns = response.turns.filter(turn => !seen.has(turn.turn_id));
       setData(prev => {
         if (!prev) return response;
-        const seen = new Set(prev.turns.map(turn => turn.turn_id));
-        const olderTurns = response.turns.filter(turn => !seen.has(turn.turn_id));
-        if (olderTurns.length === 0) {
+        const currentIds = new Set(prev.turns.map(turn => turn.turn_id));
+        const turnsToAdd = olderTurns.filter(turn => !currentIds.has(turn.turn_id));
+        if (turnsToAdd.length === 0) {
           return {
             ...prev,
             next_before_turn_id: response.next_before_turn_id,
           };
         }
-        setSelectedIdx(idx => idx + olderTurns.length);
         return {
           ...prev,
-          turns: [...olderTurns, ...prev.turns],
+          turns: [...turnsToAdd, ...prev.turns],
           next_before_turn_id: response.next_before_turn_id,
         };
       });
+      if (olderTurns.length > 0) {
+        setSelectedIdx(idx => idx + olderTurns.length);
+      }
       setHasMoreTurns(response.turns.length === TURN_PAGE_SIZE);
     } catch (err) {
       if (err instanceof ApiError) {
@@ -718,7 +722,7 @@ export function ContextDebugger({ contextId, isOpen, onClose, lastEvent, initial
     } finally {
       setLoadingOlder(false);
     }
-  }, [contextId, data?.next_before_turn_id, loadingOlder]);
+  }, [contextId, data?.next_before_turn_id, data?.turns, loadingOlder]);
 
   useEffect(() => {
     if (isOpen && contextId) {
@@ -862,14 +866,30 @@ export function ContextDebugger({ contextId, isOpen, onClose, lastEvent, initial
     let cancelled = false;
     setSearchHydrating(true);
     setSearchHydrationError(null);
-    fetchTurns(contextId, {
-      limit: data.turns.length,
-      view: 'typed',
-      include_unknown: true,
-    })
-      .then(response => {
+    const loadedTurnIds = data.turns.map(turn => turn.turn_id);
+    const hydrateLoadedTurns = async () => {
+      const hydrated = new Map<string, Turn>();
+      const concurrency = 16;
+      for (let offset = 0; offset < loadedTurnIds.length; offset += concurrency) {
+        const page = await Promise.all(
+          loadedTurnIds.slice(offset, offset + concurrency).map(turnId => fetchTurn(contextId, turnId))
+        );
+        for (const turn of page) hydrated.set(turn.turn_id, turn);
+      }
+      return hydrated;
+    };
+    hydrateLoadedTurns()
+      .then(hydrated => {
         if (!cancelled) {
-          setData(response);
+          setData(prev => {
+            if (!prev) return prev;
+            const { string_limit: _stringLimit, ...completeMeta } = prev.meta;
+            return {
+              ...prev,
+              meta: completeMeta,
+              turns: prev.turns.map(turn => hydrated.get(turn.turn_id) ?? turn),
+            };
+          });
           setSelectedTurnDetail(null);
         }
       })
@@ -1441,6 +1461,18 @@ export function ContextDebugger({ contextId, isOpen, onClose, lastEvent, initial
                       </div>
                     ) : (
                       <>
+                        {selectedTurn.projection_error && (
+                          <div className="flex items-start gap-2 rounded border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-300">
+                            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                            <div>
+                              <div className="font-medium">Typed projection unavailable</div>
+                              <div className="mt-1 break-words font-mono text-xs text-amber-200/80">
+                                {selectedTurn.projection_error.message}
+                              </div>
+                            </div>
+                          </div>
+                        )}
+
                         {/* Primary content view - uses dynamic renderer registry */}
                         <DynamicRenderer
                           data={selectedTurn.data}
@@ -1485,7 +1517,7 @@ export function ContextDebugger({ contextId, isOpen, onClose, lastEvent, initial
                         {/* Collapsible raw payload */}
                         <CollapsibleSection title="Raw Payload" data-raw-payload-section>
                           <pre data-raw-payload className="text-[11px] text-theme-text-muted whitespace-pre-wrap break-words font-mono leading-relaxed max-h-[300px] overflow-y-auto">
-                            {safeStringify(selectedTurn.data)}
+                            {safeStringify(selectedTurn.data ?? selectedTurn.projection_error)}
                           </pre>
                         </CollapsibleSection>
                       </>

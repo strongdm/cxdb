@@ -57,7 +57,7 @@ export function SessionsErrorsBar({ sessions, errors, perf, className }: Session
   const hasErrors = errors.total > 0;
 
   return (
-    <div className={cn('flex flex-col items-start justify-between gap-2 rounded-lg border border-theme-border bg-theme-bg-tertiary/50 px-3 py-2 sm:flex-row sm:items-center sm:px-4', className)}>
+    <div className={cn('flex flex-col items-stretch gap-2 rounded-lg border border-theme-border bg-theme-bg-tertiary/50 px-3 py-2 sm:px-4', className)}>
       <div className="flex items-center gap-4 text-sm">
         {/* Sessions info */}
         <div className="flex items-center gap-4 text-sm">

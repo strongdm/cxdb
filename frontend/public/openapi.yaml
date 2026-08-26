@@ -291,7 +291,7 @@ components:
         type_id: {type: string}
         type_version: {type: integer, minimum: 1}
         parent_turn_id: {type: string, description: Omit or use zero for the current context head}
-        payload_base64: {type: string, contentEncoding: base64}
+        payload_base64: {type: string, contentEncoding: base64, description: 'Complete MessagePack map, at most 4 MiB after decoding'}
         data: {description: Typed JSON encoded through the matching registry descriptor}
         payload: {description: Alias for data}
     AppendTurnBatch:
@@ -300,8 +300,8 @@ components:
         - {required: [turns]}
         - {required: [items]}
       properties:
-        turns: {type: array, minItems: 1, items: {$ref: '#/components/schemas/AppendTurn'}}
-        items: {type: array, minItems: 1, items: {$ref: '#/components/schemas/AppendTurn'}}
+        turns: {type: array, minItems: 1, maxItems: 256, description: Payloads must total at most 16 MiB, items: {$ref: '#/components/schemas/AppendTurn'}}
+        items: {type: array, minItems: 1, maxItems: 256, description: Alias for turns; payloads must total at most 16 MiB, items: {$ref: '#/components/schemas/AppendTurn'}}
     AppendTurnBatchResult:
       type: object
       required: [context_id, turns, partial]
