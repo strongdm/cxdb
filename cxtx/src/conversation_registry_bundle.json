@@ -46,7 +46,8 @@
             "5": { "name": "agent", "type": "string", "optional": true },
             "6": { "name": "turn_number", "type": "int64", "optional": true },
             "7": { "name": "max_turns", "type": "int64", "optional": true },
-            "8": { "name": "finish_reason", "type": "string", "optional": true }
+            "8": { "name": "finish_reason", "type": "string", "optional": true },
+            "11": { "name": "event_blobs", "type": "map", "optional": true }
           }
         }
       }
